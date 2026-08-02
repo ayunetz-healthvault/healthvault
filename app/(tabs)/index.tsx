@@ -18,7 +18,7 @@ import {
   selectParent,
   selectParentStats,
   selectUpcomingFollowUps,
-  useVaultStore,
+  useVaultSnapshot,
 } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
 import { pluralise } from '@/utils/format';
@@ -36,12 +36,7 @@ export default function DashboardScreen(): React.JSX.Element {
   const router = useRouter();
   const firstName = useSessionStore((state) => state.user?.fullName?.split(' ')[0] ?? null);
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
 
   const overdue = selectOverdueFollowUps(vault);
   const upcoming = selectUpcomingFollowUps(vault, UPCOMING_LIMIT);

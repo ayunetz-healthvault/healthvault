@@ -4,7 +4,7 @@ import { StyleSheet } from 'react-native';
 
 import { Button, ConfirmDialog, EmptyState, Screen, Text } from '@/components';
 import { ParentForm } from '@/features/parents/ParentForm';
-import { selectParent, useVaultStore } from '@/state/vaultStore';
+import { selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { spacing } from '@/theme';
 import type { ParentDraft } from '@/types/domain';
 import { pluralise } from '@/utils/format';
@@ -14,12 +14,7 @@ export default function EditParentScreen(): React.JSX.Element {
   const router = useRouter();
   const [deleteVisible, setDeleteVisible] = useState(false);
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
   const updateParent = useVaultStore((state) => state.updateParent);
   const removeParent = useVaultStore((state) => state.removeParent);
 

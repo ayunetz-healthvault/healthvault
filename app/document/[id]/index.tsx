@@ -22,6 +22,7 @@ import {
   selectDocument,
   selectParent,
   selectSummaryForDocument,
+  useVaultSnapshot,
   useVaultStore,
 } from '@/state/vaultStore';
 import { colors, radius, spacing } from '@/theme';
@@ -46,12 +47,7 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
   const router = useRouter();
   const [deleteVisible, setDeleteVisible] = useState(false);
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
   const removeDocument = useVaultStore((state) => state.removeDocument);
 
   const document = id ? selectDocument(vault, id) : undefined;

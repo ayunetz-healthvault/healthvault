@@ -34,20 +34,30 @@ export default function SignInScreen(): React.JSX.Element {
       signIn(session);
       router.replace('/');
     } catch (caught) {
-      setError(
-        caught instanceof AuthError ? caught.message : 'Could not sign in. Please try again.',
-      );
+      if (caught instanceof AuthError) {
+        setError(caught.message);
+      } else {
+        // Anything reaching here is a bug rather than bad input (a keychain
+        // write failing, say). Keep the copy calm for the user, but put the
+        // real cause somewhere a developer can actually find it.
+        console.error('[ayunetz] Unexpected sign-in failure:', caught);
+        setError('Could not sign in. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
   };
 
   const handleDemo = async (): Promise<void> => {
+    setError(null);
     setSubmitting(true);
     try {
       const session = await authService.signInAsDemo();
       signIn(session);
       router.replace('/');
+    } catch (caught) {
+      console.error('[ayunetz] Unexpected demo sign-in failure:', caught);
+      setError('Could not start the demo. Please try again.');
     } finally {
       setSubmitting(false);
     }

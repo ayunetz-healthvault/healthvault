@@ -17,7 +17,7 @@ import {
 } from '@/components';
 import { DELETION_GRACE_DAYS, accountService } from '@/services/account/accountService';
 import { useSessionStore } from '@/state/sessionStore';
-import { useVaultStore } from '@/state/vaultStore';
+import { useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { spacing } from '@/theme';
 import { pluralise } from '@/utils/format';
 
@@ -35,12 +35,7 @@ export default function DeleteDataScreen(): React.JSX.Element {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>('documents');
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
   const removeDocument = useVaultStore((state) => state.removeDocument);
   const clearAll = useVaultStore((state) => state.clearAll);
   const signOut = useSessionStore((state) => state.signOut);

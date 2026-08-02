@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
+import { useShallow } from 'zustand/react/shallow';
 
 import { MOCK_DOCUMENTS, MOCK_SUMMARIES } from '@/mocks/documents';
 import { buildMockFollowUps } from '@/mocks/followUps';
@@ -218,6 +219,26 @@ export interface VaultSnapshot {
   summaries: DocumentSummary[];
   followUps: FollowUp[];
 }
+
+/**
+ * The whole vault, for screens that need to run several selectors together.
+ *
+ * `useShallow` is not optional here. A selector that builds a fresh object is
+ * compared with `Object.is` by default, so it looks changed on every store
+ * read — which renders, which reads, which renders. That is an infinite loop,
+ * and React surfaces it as "Maximum update depth exceeded".
+ *
+ * Always reach for this rather than hand-rolling the selector at a call site.
+ */
+export const useVaultSnapshot = (): VaultSnapshot =>
+  useVaultStore(
+    useShallow((state) => ({
+      parents: state.parents,
+      documents: state.documents,
+      summaries: state.summaries,
+      followUps: state.followUps,
+    })),
+  );
 
 export const selectParent = (state: VaultSnapshot, parentId: string): ParentProfile | undefined =>
   state.parents.find((parent) => parent.id === parentId);

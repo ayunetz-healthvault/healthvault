@@ -17,7 +17,7 @@ import {
 } from '@/components';
 import { calendarService } from '@/services/calendar/calendarService';
 import { useSessionStore } from '@/state/sessionStore';
-import { selectDocument, selectParent, useVaultStore } from '@/state/vaultStore';
+import { selectDocument, selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
 import type { FollowUpStatus } from '@/types/domain';
 import {
@@ -38,12 +38,7 @@ export default function FollowUpScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
   const setFollowUpStatus = useVaultStore((state) => state.setFollowUpStatus);
   const attachCalendarEvent = useVaultStore((state) => state.attachCalendarEvent);
   const removeFollowUp = useVaultStore((state) => state.removeFollowUp);

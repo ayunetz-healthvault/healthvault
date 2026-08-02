@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { Button, ChipSelect, EmptyState, FollowUpCard, Screen, Text } from '@/components';
-import { selectParent, useVaultStore } from '@/state/vaultStore';
+import { selectParent, useVaultSnapshot } from '@/state/vaultStore';
 import { spacing } from '@/theme';
 import type { FollowUp } from '@/types/domain';
 import { byDueDateAsc, isOverdue } from '@/utils/date';
@@ -57,12 +57,7 @@ export default function ScheduleScreen(): React.JSX.Element {
   const router = useRouter();
   const [filter, setFilter] = useState<Filter>('upcoming');
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
 
   const visible = useMemo(() => applyFilter(vault.followUps, filter), [vault.followUps, filter]);
 

@@ -33,9 +33,12 @@ export default function SignUpScreen(): React.JSX.Element {
       signIn(session);
       router.replace('/');
     } catch (caught) {
-      setError(
-        caught instanceof AuthError ? caught.message : 'Could not create the account. Try again.',
-      );
+      if (caught instanceof AuthError) {
+        setError(caught.message);
+      } else {
+        console.error('[ayunetz] Unexpected sign-up failure:', caught);
+        setError('Could not create the account. Try again.');
+      }
     } finally {
       setSubmitting(false);
     }

@@ -18,7 +18,7 @@ import {
   selectDocumentTimeline,
   selectFollowUpsForParent,
   selectParent,
-  useVaultStore,
+  useVaultSnapshot,
 } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
 import { RELATIONSHIP_LABELS } from '@/types/labels';
@@ -35,12 +35,7 @@ export default function ParentProfileScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
 
-  const vault = useVaultStore((state) => ({
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-  }));
+  const vault = useVaultSnapshot();
 
   const parent = id ? selectParent(vault, id) : undefined;
 
