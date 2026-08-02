@@ -47,3 +47,6 @@ coverage/
 # generated native folders
 /ios
 /android
+
+# JetBrains IDE
+.idea/

@@ -74,11 +74,45 @@ npm run verify
 
 - Node 20+ and npm 10+
 - Expo SDK 57 / React Native 0.86 / React 19
-- Android Studio (Android) or Xcode (iOS) for a native build
+- Android Studio (Android) or Xcode (iOS) — only for a native build
 
-The camera, gallery, file picker, calendar and biometrics all need a **development
-build** or a real device — they do not work in a web preview. `npx expo run:android`
-produces one.
+### Three ways to run it
+
+| Path                      | Needs                  | What works                                     |
+| ------------------------- | ---------------------- | ---------------------------------------------- |
+| **Web preview** (fastest) | Nothing but Node       | All UI, navigation, data. No device features.  |
+| **Expo Go** on your phone | The Expo Go app        | Everything, including camera and biometrics.   |
+| **Native build**          | Android Studio / Xcode | Everything, plus the real app icon and splash. |
+
+**Web preview** — no Android SDK or Xcode needed:
+
+```bash
+npm run web
+```
+
+Camera, gallery, file picker, calendar and biometrics are device APIs and do
+nothing in a browser. Everything else — onboarding, the disclaimer gate,
+dashboard, profiles, summaries, follow-ups, settings — works fully.
+
+Note that `expo-secure-store` has no web implementation, so on web the app
+falls back to `localStorage` and logs a warning. That fallback is **not
+secure** and exists only so the UI can be demoed. See
+`src/services/storage/secureStorage.ts`.
+
+**Expo Go** — the quickest way to exercise the camera and biometrics:
+
+```bash
+npm start
+```
+
+Then scan the QR code with the Expo Go app. Every native module this project
+uses is bundled in Expo Go, so no custom build is required.
+
+**Native build** — needed only for the real icon, splash and bundle ID:
+
+```bash
+npx expo run:android
+```
 
 ### Trying the demo
 
@@ -349,6 +383,68 @@ npm test
 ```
 
 ---
+
+## Deploying
+
+`eas.json` defines three build profiles, and both bundles are verified to
+build (`expo export` passes for web and Android).
+
+Every route below needs an account you have to sign in to yourself — an Expo
+account for EAS, a Google Play or Apple developer account for the stores, or a
+hosting account for the web build. None of that is checked into this repo.
+
+### Web (static — good for a stakeholder demo)
+
+The production build is a plain static folder with no server component:
+
+```bash
+npx expo export --platform web --output-dir dist
+```
+
+`dist/` then drops onto any static host — S3 + CloudFront, Netlify, Vercel,
+GitHub Pages, or EAS Hosting (`npx eas-cli deploy`). It has been verified to
+run correctly from a bare static file server. Configure the host to rewrite
+unknown paths to `index.html`, since the app is an SPA.
+
+Remember this is a **preview**, not the product: camera, gallery, calendar and
+biometrics are device APIs, and the secure-storage fallback on web is not
+secure. Do not point a web deployment at real patient data.
+
+### Android and iOS (EAS Build)
+
+```bash
+npx eas-cli login
+```
+
+```bash
+npx eas-cli build --profile preview --platform android
+```
+
+`preview` produces an installable APK for internal testing. `production`
+produces an AAB for Play, and `npx eas-cli build --profile production
+--platform ios` produces an IPA.
+
+Before the first build you will need to:
+
+1. Create an Expo account and run `eas login`.
+2. Replace the placeholder `extra.eas.projectId` in `app.json` — `eas init`
+   fills this in.
+3. Let EAS generate signing credentials, or supply your own keystore.
+4. For iOS, enrol in the Apple Developer Program; for Android, create a Play
+   Console app with the package `in.ayunetz.healthvault`.
+
+### Store submission
+
+```bash
+npx eas-cli submit --profile production --platform android
+```
+
+Do not ship to a public store yet. `production` sets
+`EXPO_PUBLIC_USE_MOCKS=false`, which points the app at a backend that does not
+exist — auth, upload and summaries will all fail. It also has the open
+`TODO(security)` items below, and both stores require a privacy policy and a
+health-data declaration that have not been written. Use the `preview` profile
+for internal distribution until the AWS stack is real.
 
 ## Known gaps before this handles real patient data
 
