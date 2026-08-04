@@ -6,6 +6,10 @@ This directory defines the approved implementation architecture for Ayunetz Heal
 
 The product helps caregivers organise a family member's medical documents, understand what a document says in plain language, and track follow-up actions. It is not a diagnostic or treatment system.
 
+[progress.md](./progress.md) records which steps are complete and what each one
+changed. It is the answer to "where are we?" — this file and the phase
+documents state the intent and do not change as work lands.
+
 The architecture is divided into two delivery phases:
 
 | Phase | Objective | Runtime | Permitted data |
@@ -252,6 +256,9 @@ A step is complete only when:
 - no secrets are introduced
 - no real patient data is used
 - documentation is updated where required
+- the step has an entry in [progress.md](./progress.md) recording what changed,
+  the decisions taken, the tests added, the verification run and the honest
+  limitations
 - the agent has reported limitations honestly
 
 ## Architecture decision records

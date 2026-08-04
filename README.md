@@ -31,8 +31,13 @@ production shape already in place, marked `TODO(backend)`.
 | Device calendar         | Real device API, behind explicit per-event confirmation       |
 | Biometric / PIN lock    | Real device API                                               |
 | Auth                    | **Placeholder** — local mock session, Cognito-shaped          |
-| Upload                  | **Mock** — presigned-S3-shaped, no bytes leave the device     |
-| Document summaries      | **Mock** — deterministic, no model is called                  |
+| Upload                  | **Mock** by default; real multipart to the Phase 1 backend    |
+| Document summaries      | **Mock** by default; real OCR + redaction via `backend/`      |
+
+Work beyond this MVP follows the roadmap in
+[`docs/architecture/`](docs/architecture/README.md), which replaces the mocks
+with a privacy-first document-processing pipeline. Current position:
+[`docs/architecture/progress.md`](docs/architecture/progress.md).
 
 ---
 
@@ -360,7 +365,7 @@ usually in a hurry:
 
 ## Testing
 
-227 tests across 16 suites, covering the parts where a bug would be expensive:
+307 tests across 23 suites, covering the parts where a bug would be expensive:
 
 | Suite             | Focus                                                        |
 | ----------------- | ------------------------------------------------------------ |
@@ -373,6 +378,7 @@ usually in a hurry:
 | `appLock`         | PIN hashing round-trip, biometric fallback resolution        |
 | `vaultStore`      | cascade deletes, selectors, overdue counting, seeding        |
 | `captureStore`    | page reorder bounds, retake-in-place, readiness              |
+| `mocks/documents` | seed integrity, source-page traceability, snippet PII guard  |
 | Component suites  | Button, ChipSelect, ConfirmDialog, PageReviewTile, cards     |
 
 Every Expo native module is mocked in `jest.setup.ts`, so tests never touch a
