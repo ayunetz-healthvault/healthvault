@@ -5,10 +5,15 @@ module.exports = {
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',
   },
+  // Screen tests live in `__tests__/`, mirroring the route path, and NOT in
+  // `app/`. Expo Router turns every `.tsx` under `app/` into a route — its
+  // context regex excludes only `+api`, `+middleware`, `+html` and
+  // `+native-intent` — so a test file there is bundled and executed as a
+  // screen. It crashes the whole app on load with `expect is not defined`.
   testMatch: [
     '<rootDir>/src/**/*.test.ts',
     '<rootDir>/src/**/*.test.tsx',
-    '<rootDir>/app/**/*.test.tsx',
+    '<rootDir>/__tests__/**/*.test.tsx',
   ],
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',

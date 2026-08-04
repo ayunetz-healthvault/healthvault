@@ -395,4 +395,51 @@ describe('SarvamSummaryProvider — failure handling', () => {
     ).rejects.toMatchObject({ code: 'processing_timeout' });
     expect(vi.mocked(fetchImpl)).not.toHaveBeenCalled();
   });
+
+  it('gives up on a provider that never answers', async () => {
+    // The caller-abort test above shares this error path but not its cause.
+    // This is the one that matters in production: Sarvam accepts the
+    // connection and then goes quiet, and the request must not hang for as
+    // long as the socket stays open.
+    //
+    // The code is `ai_failed`, not `processing_timeout`, and deliberately so:
+    // `processing_timeout` carries the message "Processing was cancelled",
+    // which is true when the caller walked away and misleading when the
+    // provider stopped talking. A hung provider is an unreachable one, and
+    // retryable.
+    const hangs: typeof fetch = vi.fn(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = (init as RequestInit | undefined)?.signal;
+          signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'TimeoutError'));
+          });
+        }),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      sarvam(hangs, { timeoutMs: 20, maxAttempts: 1 }).createSummary(input),
+    ).rejects.toMatchObject({ code: 'ai_failed', retryable: true });
+  });
+
+  it('bounds total time by attempts x timeout, not by the socket', async () => {
+    const hangs: typeof fetch = vi.fn(
+      async (_url, init) =>
+        new Promise((_resolve, reject) => {
+          (init as RequestInit | undefined)?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'TimeoutError'));
+          });
+        }),
+    ) as unknown as typeof fetch;
+
+    const started = Date.now();
+    await expect(
+      sarvam(hangs, { timeoutMs: 20, maxAttempts: 3 }).createSummary(input),
+    ).rejects.toMatchObject({ code: 'ai_failed' });
+
+    // Three attempts of 20ms each. Generous upper bound; the point is that it
+    // terminates at all rather than waiting on a socket that never closes.
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(vi.mocked(hangs)).toHaveBeenCalledTimes(3);
+  });
 });

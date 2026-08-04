@@ -23,7 +23,7 @@ the intent and do not change as work lands. This file is the record.
 | P1-10   | Connect the Expo application              | Done — 2026-08-03                   |
 | P1-11   | Safety and traceability UI                | Done — 2026-08-03                   |
 | —       | Facility identity (ADR-002 decision)      | Done — 2026-08-04                   |
-| P1-12   | Phase 1 verification and exit review      | Not started                         |
+| P1-12   | Phase 1 verification and exit review      | Run 2026-08-04 — 2 findings open    |
 | Phase 2 | Cloud platform                            | Not started — gated on Phase 1 exit |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
@@ -1232,3 +1232,120 @@ the real documents.
 `Sector 5`-style addresses, where the number follows the street type, are not
 matched. Neither is a facility name with no keyword in it at all — a clinic
 called simply `Ayushman` is invisible to a rule anchored on `Hospital`.
+
+---
+
+## P1-12 — Phase 1 verification and exit review
+
+**Run 2026-08-04.** Every item on the checklist was executed. Two findings stop
+this being a clean pass; both are recorded below rather than quietly fixed.
+
+### Verification results
+
+| Check                       | Result                                        |
+| --------------------------- | --------------------------------------------- |
+| Frontend test suite         | 331 passing, 24 suites                        |
+| Backend unit tests          | passing                                       |
+| Backend integration tests   | passing (373 total, 14 files)                 |
+| OCR fixture test            | passing                                       |
+| Redaction tests             | passing                                       |
+| Leakage tests               | passing                                       |
+| Malformed model output      | covered — `rejects malformed JSON`            |
+| Provider timeout            | covered — gap found and closed, see below     |
+| Transient retry             | covered                                       |
+| Temporary-file cleanup      | covered, and confirmed against a live server  |
+| Secret scan                 | clean — manual, no scanner configured         |
+| Log-content review          | clean, asserted by test and confirmed live    |
+| End-to-end synthetic report | passing                                       |
+| Browser demo regression     | **failed, then fixed** — see finding 1        |
+| Mobile request-path         | passing against a live backend over real HTTP |
+| `git diff --check`          | clean                                         |
+
+### Finding 1 — the app did not start at all
+
+`app/document/processing.test.tsx` crashed the entire application on load with
+`expect is not defined`.
+
+Expo Router turns **every** `.tsx` under `app/` into a route. Its context regex
+excludes only `+api`, `+middleware`, `+html` and `+native-intent`; there is no
+exclusion for test files. So the test was bundled and executed as a screen.
+
+Nothing in the test suite could have caught this — the file passed as a test
+while breaking the app that contained it. It took loading the app in a browser,
+which is the entire argument for keeping that step on the checklist.
+
+Fixed by moving the file to `__tests__/app/document/`, mirroring the route path,
+with `jest.config.js` pointing there and carrying a comment explaining why
+screen tests may never live under `app/`.
+
+### Finding 2 — a privacy claim the build does not honour
+
+The disclaimer screen tells the user:
+
+> Documents are encrypted and stored in the Mumbai (ap-south-1) region.
+
+In Phase 1 that is **not true**. There is no cloud storage; documents are held
+locally and processed by a backend running on a developer machine or in
+Codespaces. § 8 of phase-1.md requires the operational limitations to stay
+visible in documentation _and demos_, and this is the opposite — a specific,
+confident, incorrect statement about where a family's medical records live.
+
+Left unchanged deliberately: it is product copy, and the fix is a product
+decision about what to say instead. **It should be corrected before this build
+is shown to anyone outside the team.**
+
+The neighbouring limitation is handled well and is the model to follow — the
+sign-in screen says plainly that authentication is not connected to a server.
+
+### Also found, not blocking
+
+- **`EXPO_PUBLIC_API_TIMEOUT_MS` is read into config and never applied.** No
+  timeout is set on the processing request in `devProcessingClient`, so the app
+  waits indefinitely on a backend that stops answering, while the backend
+  itself can legitimately take three attempts of sixty seconds on the Sarvam
+  call alone. This is the same shape as the calendar hang fixed during the
+  screen walk: a call that never returns strands the UI.
+- **Provider timeout reports `ai_failed`, not `processing_timeout`.** Correct as
+  it stands — `processing_timeout` carries the message "Processing was
+  cancelled", which is true when the caller walks away and misleading when the
+  provider goes quiet — but only the caller-abort branch had a test. Two added,
+  including one asserting total time is bounded by attempts × timeout rather
+  than by the socket.
+- **Document rows are not exposed to the accessibility tree.** They are
+  reachable by touch but carry no role or label, so a screen reader cannot find
+  them. Not a Phase 1 exit criterion; worth a look before real users.
+
+### Exit criteria
+
+Met: OCR extracts page-aware text; known PII is redacted; likely remaining PII
+blocks the AI call; only redacted text reaches the provider; output conforms to
+the shared schema; important values retain page sources; confidence and
+uncertainties display; temporary files are always deleted; logs contain no
+medical text or PII; mock mode works; all tests pass.
+
+Confirmed by driving the running application, not only by test: the summary
+screen shows per-page source badges on every finding and medicine, an
+uncertainty banner, `confidence 88%`, and `8 personal details removed before
+this document was summarised (redaction-v2)`.
+
+A live request over real HTTP, using the field names the app actually sends,
+returned `redaction-v2` with `facility: 1` and `patientName: 1` — the facility
+rules firing on genuine OCR output rather than a fixture. OCR confidence came
+back at 48, and the low-confidence hedging engaged as designed.
+
+**Not met: "no real patient data has been used."** Four real documents — a lab
+report, a photographed handwritten prescription, a discharge summary and a
+laboratory report — were used to find redaction failures. They were never
+committed, and every regression test derived from them is written from
+synthetic text. But the criterion as written is not satisfied, and recording it
+as passed would be false. The honest statement is that Phase 1 committed only
+synthetic data and tested against a small number of real documents supplied for
+that purpose.
+
+### Recommendation
+
+Phase 1 is functionally complete and the privacy pipeline does what it claims.
+Two things should happen before it is demonstrated outside the team: correct the
+storage claim on the disclaimer screen, and put a timeout on the processing
+request. Neither is large. The Phase 2 gate should also record the real-document
+question above rather than inherit a criterion that was not met.

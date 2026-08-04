@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import ProcessingScreen from './[id]/processing';
+import ProcessingScreen from '../../../app/document/[id]/processing';
 
 import { MOCK_PARENTS } from '@/mocks/parents';
 import { useVaultStore } from '@/state/vaultStore';

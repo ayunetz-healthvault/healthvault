@@ -24,6 +24,7 @@ export const SYNTHETIC_HEADER = [
   'Address: 12 Bharathi Salai, Mylapore',
   'Chennai 600004',
   'Phone: +91 98400 12345',
+  'Web: www.southern-diagnostics.example.org',
   '',
   'Patient Name: Lakshmi Iyer',
   'DOB: 18/04/1955',
@@ -54,10 +55,19 @@ export const SYNTHETIC_CLINICAL = [
 
 export const SYNTHETIC_REPORT = `${SYNTHETIC_HEADER}\n${SYNTHETIC_CLINICAL}`;
 
-/** Values that must not survive redaction. */
+/**
+ * Values that must not survive redaction.
+ *
+ * The facility entries were added with the 2026-08-04 decision: where the
+ * report was made is no longer something that leaves the boundary. They are
+ * listed here rather than only in the unit tests so that the end-to-end
+ * response and the log-content assertions both check them too.
+ */
 export const MUST_NOT_SURVIVE = [
   'Lakshmi',
   'Iyer',
+  'SOUTHERN DIAGNOSTICS LABORATORY',
+  'southern-diagnostics',
   '12 Bharathi Salai',
   'Mylapore',
   '98400',
