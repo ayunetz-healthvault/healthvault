@@ -58,4 +58,20 @@ describe('FindingRow', () => {
     expect(label).toContain('8.1 %');
     expect(label).toContain('Discuss with the doctor');
   });
+  it('shows the page a value was read from, so it can be checked', async () => {
+    await render(
+      <FindingRow
+        finding={finding({ sources: [{ documentId: 'doc_1', page: 2 }] })}
+        testID="finding"
+      />,
+    );
+
+    expect(screen.getByText('Page 2')).toBeTruthy();
+  });
+
+  it('shows no source badge for a summary written before the pipeline existed', async () => {
+    await render(<FindingRow finding={finding()} testID="finding" />);
+
+    expect(screen.queryByTestId('finding-source')).toBeNull();
+  });
 });

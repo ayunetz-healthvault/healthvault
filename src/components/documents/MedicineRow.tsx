@@ -3,6 +3,8 @@ import { StyleSheet, View } from 'react-native';
 
 import { Text } from '../ui';
 
+import { SourceBadge } from './SourceBadge';
+
 import { colors, radius, spacing } from '@/theme';
 import type { MedicineMention } from '@/types/domain';
 
@@ -49,6 +51,14 @@ export function MedicineRow({ medicine, testID }: MedicineRowProps): React.JSX.E
             For: {medicine.purpose}
           </Text>
         ) : null}
+
+        {medicine.duration ? (
+          <Text variant="caption" tone="muted">
+            Duration: {medicine.duration}
+          </Text>
+        ) : null}
+
+        <SourceBadge sources={medicine.sources} testID={testID ? `${testID}-source` : undefined} />
       </View>
     </View>
   );

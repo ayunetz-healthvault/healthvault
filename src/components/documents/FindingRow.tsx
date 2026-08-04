@@ -3,6 +3,8 @@ import { StyleSheet, View } from 'react-native';
 
 import { Text } from '../ui';
 
+import { SourceBadge } from './SourceBadge';
+
 import { colors, radius, spacing } from '@/theme';
 import type { FindingSeverity, SummaryFinding } from '@/types/domain';
 import { FINDING_SEVERITY_LABELS } from '@/types/labels';
@@ -65,6 +67,8 @@ export function FindingRow({ finding, testID }: FindingRowProps): React.JSX.Elem
         <Text variant="caption" style={[styles.severityLabel, { color: severity.color }]}>
           {FINDING_SEVERITY_LABELS[finding.severity]}
         </Text>
+
+        <SourceBadge sources={finding.sources} testID={testID ? `${testID}-source` : undefined} />
       </View>
     </View>
   );

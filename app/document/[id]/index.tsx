@@ -14,6 +14,7 @@ import {
   MedicineRow,
   Screen,
   SectionHeader,
+  SourceBadge,
   Text,
 } from '@/components';
 import { AI_SUMMARY_DISCLAIMER } from '@/services/ai/summaryService';
@@ -76,6 +77,12 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
   };
 
   const lowConfidence = summary !== undefined && summary.confidence < 0.7;
+  const uncertainties = summary?.uncertainties ?? [];
+  const explicitFollowUps = summary?.explicitFollowUps ?? [];
+  const redactedCount = Object.values(summary?.privacy?.redactedEntityCounts ?? {}).reduce(
+    (total, count) => total + count,
+    0,
+  );
 
   return (
     <Screen
@@ -144,6 +151,30 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
               title="Lower confidence"
               message="Parts of this document were hard to read, so this summary is less reliable than usual. Check it against the original carefully."
               testID="document-low-confidence"
+            />
+          ) : null}
+
+          {/*
+            What the pipeline could not do, stated before anything it claims to
+            have read. A missing page changes how much weight the rest deserves,
+            so burying it under the findings would be the wrong order.
+          */}
+          {uncertainties.length > 0 ? (
+            <Callout
+              tone="warning"
+              title={
+                uncertainties.length === 1
+                  ? 'One part could not be read'
+                  : `${uncertainties.length} parts could not be read`
+              }
+              message={uncertainties
+                .map((item) =>
+                  item.sourcePage === null
+                    ? item.message
+                    : `Page ${item.sourcePage}: ${item.message}`,
+                )
+                .join('\n\n')}
+              testID="document-uncertainties"
             />
           ) : null}
 
@@ -231,6 +262,52 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
             </>
           ) : null}
 
+          {/*
+            5b. Follow-ups the document itself asks for.
+            Kept separate from the generated questions below, and from the
+            follow-ups the user creates. Three different things with three
+            different authorities: the doctor wrote this, the app suggested
+            that, the user committed to the other.
+          */}
+          {explicitFollowUps.length > 0 ? (
+            <>
+              <SectionHeader
+                title="What the document asks for next"
+                subtitle="Written in the document — not created by this app"
+              />
+              <Card>
+                {explicitFollowUps.map((followUp, index) => (
+                  <View
+                    key={`${followUp.title}-${followUp.source.page}`}
+                    style={[
+                      styles.bulletRow,
+                      index === explicitFollowUps.length - 1 ? styles.bulletRowLast : null,
+                    ]}
+                  >
+                    <Ionicons
+                      name="calendar-outline"
+                      size={22}
+                      color={colors.primary}
+                      style={styles.questionIcon}
+                    />
+                    <View style={styles.bulletText}>
+                      <Text variant="callout">{followUp.title}</Text>
+                      <Text variant="caption" tone="secondary">
+                        {followUp.date
+                          ? formatDate(followUp.date)
+                          : 'No date given in the document'}
+                      </Text>
+                      <SourceBadge
+                        sources={[followUp.source]}
+                        testID={`explicit-followup-${index}-source`}
+                      />
+                    </View>
+                  </View>
+                ))}
+              </Card>
+            </>
+          ) : null}
+
           {/* 6. Which doctor */}
           <SectionHeader title="Which doctor to see" />
           <Card>
@@ -262,7 +339,9 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
             <>
               <SectionHeader
                 title="Questions to ask"
-                subtitle="Worth raising at the next consultation"
+                // Explicitly attributed. A generated question sitting under a
+                // doctor's instructions would read as something the doctor said.
+                subtitle="Written by Ayunetz from this document — nobody has asked these yet"
               />
               <Card>
                 {summary.questionsForDoctor.map((question, index) => (
@@ -293,6 +372,18 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
               Summarised {formatDateTime(summary.generatedAt)} · {summary.generatedBy} · confidence{' '}
               {Math.round(summary.confidence * 100)}%
             </Text>
+            {/*
+              Says what was removed before anything left this phone, in counts
+              only. Someone handing their parent's records to an app is owed a
+              plain statement of what it did with them.
+            */}
+            {summary.privacy ? (
+              <Text variant="caption" tone="muted" style={styles.privacyNote}>
+                {redactedCount === 0
+                  ? 'No personal identifiers were found to remove before summarising.'
+                  : `${pluralise(redactedCount, 'personal detail')} removed before this document was summarised (${summary.privacy.pipelineVersion}).`}
+              </Text>
+            ) : null}
           </View>
         </>
       )}
@@ -345,7 +436,8 @@ const styles = StyleSheet.create({
   header: { gap: spacing.sm, marginBottom: spacing.lg, paddingTop: spacing.lg },
   listCard: { overflow: 'hidden' },
   listInner: { paddingHorizontal: spacing.lg },
-  provenance: { marginTop: spacing.xxl, paddingHorizontal: spacing.xs },
+  privacyNote: { marginTop: spacing.xs },
+  provenance: { gap: spacing.xxs, marginTop: spacing.xxl, paddingHorizontal: spacing.xs },
   questionIcon: { marginTop: 1 },
   statusButton: { marginTop: spacing.lg },
   title: { marginTop: spacing.xs },
