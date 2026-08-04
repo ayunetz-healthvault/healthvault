@@ -99,6 +99,73 @@ export interface MedicalDocument {
 }
 
 // ---------------------------------------------------------------------------
+// Source traceability & privacy metadata
+//
+// Added for the Phase 1 privacy-first processing pipeline (docs/architecture).
+// Everything here is optional on the existing shapes so summaries written
+// before the pipeline existed — including the seeded demo data — stay valid.
+// ---------------------------------------------------------------------------
+
+/**
+ * Points a summary item back at the page it was read from, so the family can
+ * check any number against the original scan.
+ *
+ * `textSnippet` is optional and, when present, must be cut from the *redacted*
+ * text and pass the leakage gate — it must never reintroduce an identifier.
+ * See ADR-002 → "Source snippets".
+ */
+export interface SourceReference {
+  documentId: string;
+  /** 1-based page number within the document. */
+  page: number;
+  textSnippet?: string;
+}
+
+/**
+ * Something the pipeline could not read confidently. Surfaced in the UI rather
+ * than silently dropped, because a missing value on a lab report matters.
+ */
+export interface SummaryUncertainty {
+  message: string;
+  /** Page it relates to, or `null` when it is document-wide. */
+  sourcePage: number | null;
+}
+
+/**
+ * Identifier classes the redactor removes before any text leaves the Ayunetz
+ * boundary. Mirrors the typed placeholders in ADR-002; `other` is the
+ * deliberate catch-all so the union can stay closed.
+ */
+export type RedactionCategory =
+  | 'patientName'
+  | 'personName'
+  | 'address'
+  | 'phone'
+  | 'email'
+  | 'dateOfBirth'
+  | 'aadhaar'
+  | 'pan'
+  | 'passport'
+  | 'patientId'
+  | 'insuranceId'
+  | 'other';
+
+/**
+ * Non-sensitive record of what the privacy pipeline did.
+ *
+ * Counts only — the removed values are never carried here, in the API response
+ * or in logs. `possiblePiiRemaining` true means the leakage gate failed and no
+ * external AI call was made.
+ */
+export interface PrivacyProcessingResult {
+  redactionApplied: boolean;
+  possiblePiiRemaining: boolean;
+  redactedEntityCounts: Record<RedactionCategory, number>;
+  /** e.g. `redaction-v1` — pins a summary to the rules that produced it. */
+  pipelineVersion: string;
+}
+
+// ---------------------------------------------------------------------------
 // AI summary
 // ---------------------------------------------------------------------------
 
@@ -115,6 +182,13 @@ export interface SummaryFinding {
   severity: FindingSeverity;
   /** One sentence, no jargon — this is what the child abroad actually reads. */
   plainLanguage: string;
+  /**
+   * Unit on its own, e.g. "mg/dL", when the pipeline could separate it from
+   * `value`. `value` stays the display string either way.
+   */
+  unit?: string | null;
+  /** Where this was read from. Required in spirit for abnormal values. */
+  sources?: SourceReference[];
 }
 
 export interface MedicineMention {
@@ -126,6 +200,27 @@ export interface MedicineMention {
   frequency: string;
   /** e.g. "Blood sugar control". */
   purpose: string;
+  /** e.g. "14 days", when the document states one. */
+  duration?: string | null;
+  sources?: SourceReference[];
+}
+
+/**
+ * A follow-up the document itself asks for — "repeat HbA1c in three months",
+ * "review in four weeks".
+ *
+ * Kept separate from {@link FollowUp}, which is the record the user owns. This
+ * is a reading of the document, not a commitment: the UI must not let a
+ * generated suggestion be mistaken for something the doctor wrote.
+ */
+export interface ExplicitFollowUp {
+  title: string;
+  /** `null` when the document gives an interval but no resolvable date. */
+  date: IsoDate | null;
+  kind: FollowUpKind;
+  source: SourceReference;
+  /** 0–1. */
+  confidence: number;
 }
 
 /** Maps to the specialist the family should book next. */
@@ -161,6 +256,19 @@ export interface DocumentSummary {
   /** Model/pipeline identifier, for auditability. */
   generatedBy: string;
   readonly generatedAt: IsoDateTime;
+  /**
+   * Date the pipeline read off the document, which can disagree with
+   * `MedicalDocument.documentDate` entered by the user. Both are kept.
+   */
+  detectedDocumentDate?: IsoDate | null;
+  /** Follow-ups written in the document, with page sources. */
+  explicitFollowUps?: ExplicitFollowUp[];
+  /** What could not be read confidently. */
+  uncertainties?: SummaryUncertainty[];
+  /** What the redaction and leakage gate did before the AI call. */
+  privacy?: PrivacyProcessingResult;
+  /** Processing-pipeline version, distinct from `privacy.pipelineVersion`. */
+  pipelineVersion?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -26,8 +26,25 @@ export const formatBytes = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
-export const pluralise = (count: number, singular: string, plural = `${singular}s`): string =>
-  `${count} ${count === 1 ? singular : plural}`;
+/**
+ * Default plural for a word.
+ *
+ * Handles the consonant-then-`y` rule, because appending a bare `s` produced
+ * "2 summarys" on the account-deletion screen — the one screen where the copy
+ * needs to read as though somebody wrote it. A vowel before the `y` keeps the
+ * simple form, so "days" survives.
+ *
+ * This is not a full pluraliser and is not meant to be. Anything irregular
+ * should pass `plural` explicitly rather than grow a dictionary here.
+ */
+const defaultPlural = (singular: string): string =>
+  /[^aeiou]y$/i.test(singular) ? `${singular.slice(0, -1)}ies` : `${singular}s`;
+
+export const pluralise = (
+  count: number,
+  singular: string,
+  plural = defaultPlural(singular),
+): string => `${count} ${count === 1 ? singular : plural}`;
 
 /** Trims a long string for a single-line row without cutting mid-word. */
 export const truncate = (value: string, maxLength: number): string => {
