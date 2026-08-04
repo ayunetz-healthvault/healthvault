@@ -182,9 +182,7 @@ const PROPER_WORD = "[A-Z][A-Za-z'&.-]*";
  * tokens and to horizontal whitespace, so it cannot run past the end of a line.
  */
 const ADDRESS_TAIL =
-  `(?:[,][ \\t]*${PROPER_WORD}){0,3}` +
-  `(?:[,][ \\t]*[A-Z]{2}\\b)?` +
-  `(?:[, \\t]+\\d{5,6}(?:-\\d{4})?\\b)?`;
+  `(?:[,][ \\t]*${PROPER_WORD}){0,3}(?:[, \\t]+\\d{5,6}(?:-\\d{4})?\\b)?`;
 
 export const FACILITY_PATTERNS: PiiPattern[] = [
   {
@@ -198,20 +196,15 @@ export const FACILITY_PATTERNS: PiiPattern[] = [
   },
   {
     category: 'address',
-    // A numbered street address: `125 Riverbend Drive, Springfield, IL 62704`.
+    // `125 Riverbend Drive, Springfield, IL 62704`, `12/3 Bharathi Salai Road`,
+    // and the same streets with no house number on them at all.
+    //
+    // The number is optional but a street *name* is not, so this cannot match a
+    // bare `125 Drive`. That is not an address anyone writes, and requiring the
+    // name is what keeps the rule off clinical text.
     pattern: new RegExp(
-      `\\b\\d{1,5}(?:[/-]\\d{1,4})?[A-Za-z]?[ \\t]+` +
-        `(?:${PROPER_WORD}[ \\t]+){0,4}(?:${bothCases(STREET_TYPES)})\\b${ADDRESS_TAIL}`,
-      'g',
-    ),
-  },
-  {
-    category: 'address',
-    // The same street with no house number: `Green Valley Road, Chennai`.
-    // Safe without the number because every street type left in the list is a
-    // word no clinical phrase ends on.
-    pattern: new RegExp(
-      `\\b(?:${PROPER_WORD}[ \\t]+){1,4}(?:${bothCases(STREET_TYPES)})\\b${ADDRESS_TAIL}`,
+      `\\b(?:\\d{1,5}(?:[/-]\\d{1,4})?[A-Za-z]?[ \\t]+)?` +
+        `(?:${PROPER_WORD}[ \\t]+){1,4}(?:${bothCases(STREET_TYPES)})\\b${ADDRESS_TAIL}`,
       'g',
     ),
   },
