@@ -15,7 +15,10 @@
     "format:check": "prettier --check \"**/*.{ts,tsx,js,json,md}\"",
     "test": "jest",
     "test:watch": "jest --watch",
-    "verify": "npm run typecheck && npm run lint && npm run test"
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "backend:install": "npm --prefix backend install",
+    "backend:dev": "npm --prefix backend run dev",
+    "backend:verify": "npm --prefix backend run verify"
   },
   "dependencies": {
     "@expo/metro-runtime": "~57.0.8",

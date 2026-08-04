@@ -3,6 +3,13 @@
 # dependencies
 node_modules/
 
+# backend build output (backend/node_modules is covered by node_modules/ above)
+backend/dist/
+
+# Tesseract language data, downloaded by tesseract.js on first OCR run.
+# 5 MB of regenerable binary; see `cachePath` in TesseractOcrProvider.
+*.traineddata
+
 # Expo
 .expo/
 dist/

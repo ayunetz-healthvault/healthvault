@@ -8,7 +8,17 @@ module.exports = defineConfig([
   expoConfig,
   prettierConfig,
   {
-    ignores: ['dist/*', 'node_modules/*', '.expo/*', 'android/*', 'ios/*', 'coverage/*'],
+    // `backend/` is a separate package with its own TypeScript, ESLint and test
+    // setup — see backend/README.md for why the boundary is deliberate.
+    ignores: [
+      'dist/*',
+      'node_modules/*',
+      '.expo/*',
+      'android/*',
+      'ios/*',
+      'coverage/*',
+      'backend/*',
+    ],
   },
   {
     rules: {

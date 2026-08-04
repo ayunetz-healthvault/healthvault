@@ -16,5 +16,5 @@
     }
   },
   "include": ["**/*.ts", "**/*.tsx"],
-  "exclude": ["node_modules", "dist", ".expo", "android", "ios"]
+  "exclude": ["node_modules", "dist", ".expo", "android", "ios", "backend"]
 }
