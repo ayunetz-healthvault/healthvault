@@ -106,6 +106,7 @@ export type RedactionCategory =
   | 'passport'
   | 'patientId'
   | 'insuranceId'
+  | 'facility'
   | 'other';
 
 export const REDACTION_CATEGORIES: readonly RedactionCategory[] = [
@@ -120,6 +121,7 @@ export const REDACTION_CATEGORIES: readonly RedactionCategory[] = [
   'passport',
   'patientId',
   'insuranceId',
+  'facility',
   'other',
 ] as const;
 

@@ -148,6 +148,8 @@ export type RedactionCategory =
   | 'passport'
   | 'patientId'
   | 'insuranceId'
+  /** The clinic or hospital itself: its name, and the address it sits at. */
+  | 'facility'
   | 'other';
 
 /**

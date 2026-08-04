@@ -10,6 +10,7 @@ import { buildNameVariants, redactKnownNames } from './nameMatcher.js';
 import {
   CATCH_ALL_PATTERNS,
   EMBEDDING_PATTERNS,
+  FACILITY_PATTERNS,
   LABELLED_VALUE_PATTERNS,
   PII_PATTERNS,
   PLACEHOLDER,
@@ -20,8 +21,8 @@ import {
  * Layered redaction — the implementation of ADR-002.
  *
  * ```text
- * embedding identifiers -> known values -> labelled regions
- *   -> typed patterns -> catch-all
+ * embedding identifiers -> facility identity -> known values
+ *   -> labelled regions -> typed patterns -> catch-all
  * ```
  *
  * The order is the design, not an implementation detail. Known values run
@@ -45,7 +46,12 @@ import {
  * the rules have moved on.
  */
 
-export const REDACTION_PIPELINE_VERSION = 'redaction-v1';
+/**
+ * v2 removes facility identity as well as patient identity. A summary produced
+ * under v1 was processed by rules that let a clinic's name and street address
+ * reach the model, and the stored version is how that stays answerable.
+ */
+export const REDACTION_PIPELINE_VERSION = 'redaction-v2';
 
 export interface RedactionInputPage {
   page: number;
@@ -178,6 +184,15 @@ export class RedactionService {
     // unrecognisable, so these are matched whole, before anything else.
     let preRedacted = text;
     for (const pattern of EMBEDDING_PATTERNS) {
+      preRedacted = applyPattern(preRedacted, pattern, counts);
+    }
+
+    // --- Layer 0b: facility identity --------------------------------------
+    // Before known values, for the same reason emails are: `Chennai
+    // Diagnostics` is one name, and redacting the known city first left
+    // `[ADDRESS] Diagnostics` — a clipped facility name rather than a removed
+    // one. Matching the whole thing first removes it in one piece.
+    for (const pattern of FACILITY_PATTERNS) {
       preRedacted = applyPattern(preRedacted, pattern, counts);
     }
 

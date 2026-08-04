@@ -26,6 +26,7 @@ export const PLACEHOLDER: Record<RedactionCategory, string> = {
   passport: '[PASSPORT]',
   patientId: '[PATIENT_ID]',
   insuranceId: '[INSURANCE_ID]',
+  facility: '[FACILITY]',
   other: '[REDACTED_IDENTIFIER]',
 };
 
@@ -64,6 +65,177 @@ export const EMBEDDING_PATTERNS: PiiPattern[] = [
     category: 'other',
     // A URL carrying what looks like an identifier in its path or query.
     pattern: /\bhttps?:\/\/\S*(?:\d{5,}|[A-Za-z0-9]{12,})\S*/g,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Facility identity
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the document was produced, and the address it was produced at.
+ *
+ * The product decision (2026-08-04) is narrower than ADR-002's default and
+ * easier to state: **the content of the report goes to Sarvam, not where or who
+ * created it.** Provenance is not lost — the original document is stored
+ * locally and remains the source of truth — it simply never leaves the Ayunetz
+ * boundary. ADR-002 § "Names of clinicians and facilities" required this to be
+ * decided before production; this is the decision.
+ *
+ * A hospital name plus a date plus a condition narrows a population hard, and
+ * unlike a patient name it survives every other layer here: no label introduces
+ * a letterhead, and the app cannot tell us a value it never knew.
+ *
+ * `preserve doctor speciality and document type` still holds. None of these
+ * patterns touch `Department of Cardiology`, `Discharge Summary` or
+ * `Laboratory Report`, because every one of them requires a capitalised proper
+ * noun sitting immediately in front of the keyword.
+ */
+
+/** Escapes and allows OCR's variable spacing inside a multi-word phrase. */
+const spaced = (phrase: string): string =>
+  phrase
+    .split(' ')
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('[ \\t]+');
+
+/**
+ * Matched in both Title Case and ALL CAPS, because a letterhead is as likely to
+ * be one as the other and a case-insensitive flag would also uncapitalise the
+ * proper-noun requirement that keeps these patterns safe.
+ */
+const bothCases = (phrases: string[]): string =>
+  phrases.flatMap((phrase) => [spaced(phrase), spaced(phrase.toUpperCase())]).join('|');
+
+/**
+ * Nouns that make the words in front of them a facility name.
+ *
+ * `Lab` is deliberately absent where `Laboratory` is present: `Lab Report` and
+ * `Lab No` are document furniture, and a rule that ate the first would be
+ * removing the document type the ADR says to keep.
+ */
+const FACILITY_NOUNS = [
+  'Hospital',
+  'Clinic',
+  'Polyclinic',
+  'Nursing Home',
+  'Medical College',
+  'Medical Centre',
+  'Medical Center',
+  'Health Centre',
+  'Health Center',
+  'Healthcare',
+  'Health Care',
+  'Diagnostic Centre',
+  'Diagnostic Center',
+  'Diagnostic',
+  'Laboratories',
+  'Laboratory',
+  'Labs',
+  'Imaging Centre',
+  'Imaging Center',
+  'Scan Centre',
+  'Scan Center',
+  'Dispensary',
+  'Pharmacy',
+  'Institute',
+  'Infirmary',
+  'Sanatorium',
+];
+
+/**
+ * Street types that end an address line.
+ *
+ * Several obvious candidates are missing on purpose, because each one is also a
+ * clinical term and this layer must not destroy clinical content:
+ * `Block` (heart block), `Circle` (circle of Willis), `Cross` (cross-matching)
+ * and the bare abbreviation `St` (ST-segment elevation). Losing a rare address
+ * form is recoverable; deleting a cardiology finding is not.
+ */
+const STREET_TYPES = [
+  'Road',
+  'Rd',
+  'Street',
+  'Avenue',
+  'Ave',
+  'Drive',
+  'Lane',
+  'Marg',
+  'Nagar',
+  'Layout',
+  'Colony',
+  'Extension',
+  'Boulevard',
+  'Blvd',
+  'Highway',
+  'Parkway',
+];
+
+/** A capitalised word — Title Case or ALL CAPS — as used in a proper noun run. */
+const PROPER_WORD = "[A-Z][A-Za-z'&.-]*";
+
+/**
+ * Trailing `, Springfield, IL 62704` or `, Chennai 600004`.
+ *
+ * Consumed as part of the address rather than left behind, because a city and a
+ * postal code are the parts that actually locate the facility. Bounded to a few
+ * tokens and to horizontal whitespace, so it cannot run past the end of a line.
+ */
+const ADDRESS_TAIL =
+  `(?:[,][ \\t]*${PROPER_WORD}){0,3}` +
+  `(?:[,][ \\t]*[A-Z]{2}\\b)?` +
+  `(?:[, \\t]+\\d{5,6}(?:-\\d{4})?\\b)?`;
+
+export const FACILITY_PATTERNS: PiiPattern[] = [
+  {
+    category: 'facility',
+    // `Sunrise Multispeciality Hospital`, `METROPOLIS LABORATORIES`,
+    // `St. Mary's Clinic`. One to four proper nouns in front of the keyword.
+    pattern: new RegExp(
+      `\\b(?:${PROPER_WORD}[ \\t]+){1,4}(?:${bothCases(FACILITY_NOUNS)})(?:s|S)?\\b`,
+      'g',
+    ),
+  },
+  {
+    category: 'address',
+    // A numbered street address: `125 Riverbend Drive, Springfield, IL 62704`.
+    pattern: new RegExp(
+      `\\b\\d{1,5}(?:[/-]\\d{1,4})?[A-Za-z]?[ \\t]+` +
+        `(?:${PROPER_WORD}[ \\t]+){0,4}(?:${bothCases(STREET_TYPES)})\\b${ADDRESS_TAIL}`,
+      'g',
+    ),
+  },
+  {
+    category: 'address',
+    // The same street with no house number: `Green Valley Road, Chennai`.
+    // Safe without the number because every street type left in the list is a
+    // word no clinical phrase ends on.
+    pattern: new RegExp(
+      `\\b(?:${PROPER_WORD}[ \\t]+){1,4}(?:${bothCases(STREET_TYPES)})\\b${ADDRESS_TAIL}`,
+      'g',
+    ),
+  },
+  {
+    category: 'address',
+    pattern: /\bP\.?[ \t]?O\.?[ \t]+Box[ \t]+\d{1,6}\b/gi,
+  },
+  {
+    category: 'facility',
+    // The letterhead website. `www.sunrisehospital.org` names the facility as
+    // precisely as its letterhead does, and every rule above walked past it
+    // because it is neither a name, an address, nor an `https://` URL.
+    //
+    // Runs after the email layer, so `reports@sunrisehospital.org` has already
+    // been removed whole and this cannot clip what is left of one.
+    pattern: /\b(?:https?:\/\/)?www\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b/gi,
+  },
+  {
+    category: 'facility',
+    // A bare domain with no `www.`, restricted to real top-level domains so a
+    // decimal lab value cannot be mistaken for one. `13.8` has no TLD; the
+    // shortest thing this matches is something like `apollo.in`.
+    pattern:
+      /\b[A-Za-z0-9-]{2,}(?:\.[A-Za-z0-9-]+)*\.(?:com|org|net|edu|gov|info|health|clinic|hospital|care|in|co\.in|org\.in|net\.in)\b/gi,
   },
 ];
 

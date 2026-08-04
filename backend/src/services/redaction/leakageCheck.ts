@@ -34,6 +34,7 @@ export type LeakageCategory =
   | 'possible_email'
   | 'possible_date_of_birth'
   | 'possible_identifier'
+  | 'possible_facility'
   | 'possible_url';
 
 export type LeakageCheckResult =
@@ -67,6 +68,13 @@ const DETECTORS: Detector[] = [
     test: /\bhttps?:\/\/\S+/i,
   },
   {
+    category: 'possible_facility',
+    // A letterhead website with no scheme on it. The globe-icon lesson applies
+    // to *blocking* on a mangled `@`, not to letting the clinic's own domain
+    // through: the redactor removes these now, so one surviving is a miss.
+    test: /\bwww\.[A-Za-z0-9-]+\.[A-Za-z]{2,}\b|\b[A-Za-z0-9-]{2,}\.(?:com|org|net|edu|gov|info|health|clinic|hospital|care)\b/i,
+  },
+  {
     category: 'possible_phone',
     // Ten to thirteen contiguous digits, or the 5+5 / +91 groupings a printed
     // Indian mobile uses. Deliberately *not* "any ten digits with separators":
@@ -97,6 +105,27 @@ const DETECTORS: Detector[] = [
     test: /\b(?:address|addr|residence|residing[ \t]+at)\b(?:[ \t]*[:.-][ \t]*|[ \t]+)\S+|\bpin(?:[ \t]*code)?[ \t]*[:.-]?[ \t]*\d{6}\b/i,
   },
   {
+    category: 'possible_facility',
+    // Where the document was made. Written out longhand in both cases rather
+    // than generated, so that a bug in the redactor's pattern builder cannot
+    // also be a bug here — that shared failure is the whole thing this gate
+    // exists to survive.
+    //
+    // The noun must follow a capitalised word, and the list stops short of
+    // `Lab` and a bare `Centre` on purpose. `Sample sent to Central Lab` is a
+    // sentence a real report writes, and a gate that refused every document
+    // containing it would be switched off inside a week — the same lesson the
+    // letterhead globe icon taught.
+    test: /\b[A-Z][A-Za-z'&.-]*[ \t]+(?:Hospitals?|Clinics?|Polyclinics?|Nursing[ \t]+Home|Medical[ \t]+(?:College|Centre|Center)|Health[ \t]*(?:Centre|Center|care|[ \t]Care)|Diagnostics?|Diagnostic[ \t]+(?:Centre|Center)|Laborator(?:y|ies)|Labs|Dispensary|Pharmacy|Institute|Infirmary|Sanatorium)\b|\b[A-Z][A-Z'&.-]*[ \t]+(?:HOSPITALS?|CLINICS?|POLYCLINICS?|NURSING[ \t]+HOME|MEDICAL[ \t]+(?:COLLEGE|CENTRE|CENTER)|HEALTH[ \t]*(?:CENTRE|CENTER|CARE)|DIAGNOSTICS?|LABORATOR(?:Y|IES)|LABS|DISPENSARY|PHARMACY|INSTITUTE|INFIRMARY|SANATORIUM)\b/,
+  },
+  {
+    category: 'possible_address',
+    // A street address with no label in front of it — the letterhead form.
+    // Anchored on the street type, and on a capitalised word before it, so
+    // `2 Drive` and a lone `Road` do not fire.
+    test: /\b[A-Z][A-Za-z'&.-]*[ \t]+(?:Road|Rd|Street|Avenue|Ave|Drive|Lane|Marg|Nagar|Layout|Colony|Extension|Boulevard|Blvd|Highway|Parkway)\b|\b[A-Z][A-Z'&.-]*[ \t]+(?:ROAD|RD|STREET|AVENUE|AVE|DRIVE|LANE|MARG|NAGAR|LAYOUT|COLONY|EXTENSION|BOULEVARD|BLVD|HIGHWAY|PARKWAY)\b|\b[Pp]\.?[ \t]?[Oo]\.?[ \t]+[Bb][Oo][Xx][ \t]+\d/,
+  },
+  {
     category: 'possible_date_of_birth',
     test: /\b(?:dob|d\.o\.b|date[ \t]+of[ \t]+birth|birth[ \t]+date|born(?:[ \t]+on)?)\b(?:[ \t]*[:.-][ \t]*|[ \t]+)\S+/i,
   },
@@ -124,13 +153,16 @@ const PLACEHOLDER_PATTERN = /\[[A-Z_]+\]/g;
  * reasoned identically to the redactor could only ever confirm it.
  */
 const postcodeInAddressContext = (text: string): boolean =>
-  text
-    .split('\n')
-    .some(
-      (line) =>
-        (line.includes('[ADDRESS]') || /\b(?:address|pin(?:\s*code)?)\b/i.test(line)) &&
-        /\b[1-9]\d{5}\b/.test(line),
-    );
+  text.split('\n').some(
+    (line) =>
+      (line.includes('[ADDRESS]') ||
+        line.includes('[FACILITY]') ||
+        /\b(?:address|pin(?:\s*code)?|zip(?:\s*code)?)\b/i.test(line)) &&
+      // Six digits for an Indian PIN, five (optionally ZIP+4) for a US one.
+      // Two of the four real documents this was tested against were American
+      // and neither postal code was recognised by the Indian rule.
+      /\b[1-9]\d{5}\b|\b\d{5}(?:-\d{4})?\b/.test(line),
+  );
 
 /** Escapes a literal for use in a regular expression. */
 const escape = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

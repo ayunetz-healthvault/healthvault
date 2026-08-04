@@ -120,7 +120,7 @@ describe('POST /dev/process-document — full pipeline', () => {
     expect(body.summary.findings[0].label).toBe('HbA1c');
     expect(body.privacy.redactionApplied).toBe(true);
     expect(body.privacy.possiblePiiRemaining).toBe(false);
-    expect(body.privacy.pipelineVersion).toBe('redaction-v1');
+    expect(body.privacy.pipelineVersion).toBe('redaction-v2');
   });
 
   it('returns counts but never the values that were removed', async () => {

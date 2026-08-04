@@ -302,7 +302,23 @@ describe('false positives that would block real letterheads', () => {
   it('does not read a stray @ before a website as an email address', () => {
     // A globe icon on a hospital letterhead OCR'd as `@`. The gate refused the
     // whole document over it, and every hospital letterhead has a website.
-    expect(check('Care. Compassion. Commitment. @ www.example-hospital.org').safe).toBe(true);
+    //
+    // Since the 2026-08-04 facility decision the website is itself something
+    // the redactor removes, so this raw line is no longer expected to pass the
+    // gate outright — but the *email* misread is the regression, and it must
+    // stay fixed. The pipeline-level property is asserted below.
+    expect(
+      check('Care. Compassion. Commitment. @ www.example-hospital.org').categories,
+    ).not.toContain('possible_email');
+  });
+
+  it('passes that same letterhead line once the redactor has run on it', () => {
+    const redacted = new RedactionService().redact(
+      [{ page: 1, text: 'Care. Compassion. Commitment. @ www.example-hospital.org' }],
+      patient,
+    );
+
+    expect(checkForLeakage(redacted.pages, patient).safe).toBe(true);
   });
 
   it('still catches a genuine email address', () => {
@@ -317,5 +333,69 @@ describe('false positives that would block real letterheads', () => {
     ].join('\n');
 
     expect(check(table).safe).toBe(true);
+  });
+});
+
+describe('facility identity', () => {
+  /**
+   * The gate's job here is to be the thing that notices when the redactor's
+   * facility patterns miss. It is written independently of them — longhand,
+   * with its own noun list — so a bug in the redactor's pattern builder cannot
+   * silently be a bug in both.
+   */
+
+  it('catches a hospital name that survived redaction', () => {
+    expect(check('Sunrise Multispeciality Hospital').categories).toContain('possible_facility');
+  });
+
+  it('catches an ALL CAPS letterhead', () => {
+    expect(check('METROPOLIS LABORATORIES').categories).toContain('possible_facility');
+  });
+
+  it('catches an unlabelled street address', () => {
+    expect(check('125 Riverbend Drive').categories).toContain('possible_address');
+  });
+
+  it('catches a US ZIP code left beside an address placeholder', () => {
+    expect(check('[ADDRESS], Springfield, IL 62704').categories).toContain('possible_address');
+  });
+
+  it('catches a PIN code left beside a facility placeholder', () => {
+    expect(check('[FACILITY], Chennai 600004').categories).toContain('possible_address');
+  });
+
+  it('blocks the external call when a facility name is all that is left', () => {
+    expect(() => assertSafeToSend([{ page: 1, text: 'Sunrise Hospital' }], patient)).toThrow();
+  });
+
+  it('passes text the facility patterns have already cleaned', () => {
+    const redacted = new RedactionService().redact(
+      [{ page: 1, text: 'Sunrise Hospital\n125 Riverbend Drive, Springfield, IL 62704' }],
+      patient,
+    );
+
+    expect(checkForLeakage(redacted.pages, patient).safe).toBe(true);
+  });
+
+  // --- Must not fire -------------------------------------------------------
+  // A gate that refuses ordinary clinical documents gets switched off. These
+  // are the phrases a real report writes.
+
+  it.each([
+    'Laboratory Report',
+    'Department of Cardiology',
+    'Sample sent to Central Lab',
+    'Discharge Summary',
+    'Left Bundle Branch Block noted on ECG',
+    'ST elevation in leads V1-V3',
+  ])('does not fire on ordinary clinical text: %s', (line) => {
+    expect(check(line).safe).toBe(true);
+  });
+
+  it('never names the facility it found', () => {
+    const result = check('Sunrise Multispeciality Hospital, 125 Riverbend Drive');
+
+    expect(JSON.stringify(result)).not.toContain('Sunrise');
+    expect(JSON.stringify(result)).not.toContain('Riverbend');
   });
 });

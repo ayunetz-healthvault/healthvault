@@ -158,6 +158,7 @@ Use stable typed placeholders:
 [PASSPORT]
 [PATIENT_ID]
 [INSURANCE_ID]
+[FACILITY]
 [REDACTED_IDENTIFIER]
 ```
 
@@ -233,6 +234,29 @@ The default privacy-first position is:
 - remove specific facility names
 - preserve doctor speciality and document type
 
+### Decision — 2026-08-04
+
+Decided, ahead of production, in the terms the product owner set:
+
+> The content of the report is what goes to Sarvam. Not where it was created,
+> and not who created it.
+
+This is the default position above, plus the facility's **address and website**,
+which the list did not name. In practice the pipeline removes:
+
+- individual clinician names
+- facility names, and the letterhead address and website that identify them
+
+and preserves doctor speciality, department and document type.
+
+Provenance is not lost. The original document is stored locally and remains the
+source of truth; a family can always see which clinic issued a report. It simply
+never crosses the Ayunetz boundary.
+
+Implemented in `FACILITY_PATTERNS` under `redaction-v2`. Summaries produced under
+`redaction-v1` were processed by rules that let this information through, which
+is what the stored pipeline version exists to make answerable.
+
 ## Independent leakage gate
 
 After redaction, a separate component checks for likely residual identifiers.
@@ -254,9 +278,7 @@ Checks include:
 The leakage result contains categories only:
 
 ```ts
-type LeakageCheckResult =
-  | { safe: true; categories: [] }
-  | { safe: false; categories: string[] };
+type LeakageCheckResult = { safe: true; categories: [] } | { safe: false; categories: string[] };
 ```
 
 It must not return or log the suspected value.

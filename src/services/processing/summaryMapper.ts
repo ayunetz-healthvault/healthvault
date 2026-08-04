@@ -50,7 +50,7 @@ const FOLLOW_UP_KINDS = new Set<FollowUpKind>([
   'other',
 ]);
 
-const REDACTION_CATEGORIES: RedactionCategory[] = [
+export const REDACTION_CATEGORIES: RedactionCategory[] = [
   'patientName',
   'personName',
   'address',
@@ -62,6 +62,7 @@ const REDACTION_CATEGORIES: RedactionCategory[] = [
   'passport',
   'patientId',
   'insuranceId',
+  'facility',
   'other',
 ];
 

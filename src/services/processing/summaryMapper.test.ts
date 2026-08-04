@@ -1,4 +1,4 @@
-import { toDocumentSummary } from './summaryMapper';
+import { REDACTION_CATEGORIES, toDocumentSummary } from './summaryMapper';
 import { DocumentProcessingError, type ProcessDocumentResponse } from './types';
 
 import { MOCK_DOCUMENTS } from '@/mocks/documents';
@@ -268,8 +268,12 @@ describe('the real backend contract', () => {
     expect(summary.pipelineVersion).toBe('processing-v1');
     expect(summary.privacy?.redactionApplied).toBe(true);
     expect(summary.privacy?.possiblePiiRemaining).toBe(false);
-    // Every category present, even the ones that counted zero.
-    expect(Object.keys(summary.privacy?.redactedEntityCounts ?? {})).toHaveLength(12);
+    // Every category present, even the ones that counted zero. Asserted
+    // against the union rather than a literal, so adding a category is a
+    // one-line change here instead of a puzzle.
+    expect(Object.keys(summary.privacy?.redactedEntityCounts ?? {}).sort()).toEqual(
+      [...REDACTION_CATEGORIES].sort(),
+    );
   });
 
   it('produces a summary the app can render without optional chaining tricks', () => {

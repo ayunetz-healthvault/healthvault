@@ -26,6 +26,7 @@ const REDACTION_CATEGORIES: RedactionCategory[] = [
   'passport',
   'patientId',
   'insuranceId',
+  'facility',
   'other',
 ];
 

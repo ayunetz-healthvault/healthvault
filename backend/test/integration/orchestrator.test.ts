@@ -99,7 +99,7 @@ describe('the complete synthetic path', () => {
     expect(result.documentId).toBe('doc_synthetic_1');
     expect(result.privacy.redactionApplied).toBe(true);
     expect(result.privacy.possiblePiiRemaining).toBe(false);
-    expect(result.privacy.pipelineVersion).toBe('redaction-v1');
+    expect(result.privacy.pipelineVersion).toBe('redaction-v2');
   });
 
   it('counts what the redactor removed', async () => {

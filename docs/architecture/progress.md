@@ -22,6 +22,7 @@ the intent and do not change as work lands. This file is the record.
 | P1-09   | Document-processing orchestrator          | Done — 2026-08-03                   |
 | P1-10   | Connect the Expo application              | Done — 2026-08-03                   |
 | P1-11   | Safety and traceability UI                | Done — 2026-08-03                   |
+| —       | Facility identity (ADR-002 decision)      | Done — 2026-08-04                   |
 | P1-12   | Phase 1 verification and exit review      | Not started                         |
 | Phase 2 | Cloud platform                            | Not started — gated on Phase 1 exit |
 
@@ -1133,3 +1134,101 @@ say. It should be decided rather than drifted into.
 
 Also unchanged: handwriting is not usable with Tesseract. Hedging the output is
 mitigation, not a fix. A handwriting-capable OCR is a Phase 2 question.
+
+---
+
+## Facility identity — the decision ADR-002 was waiting for
+
+**Done 2026-08-04.** The largest known gap from the real-document rounds, closed.
+
+ADR-002 § "Names of clinicians and facilities" listed four options and required
+one to be chosen before production. It was chosen in plainer terms than the ADR
+offered:
+
+> The content of the report is what goes to Sarvam. Not where it was created,
+> and not who created it.
+
+That is the ADR's own default position plus two things its list did not name —
+the facility's **address** and its **website**.
+
+### What now goes
+
+- **Facility names**, in Title Case or ALL CAPS: `Sunrise Multispeciality
+Hospital`, `METROPOLIS LABORATORIES`, `St. Mary's Clinic`.
+- **Street addresses**, with or without a house number, including the trailing
+  city, state and postal code: `125 Riverbend Drive, Springfield, IL 62704` and
+  `123 Green Valley Road, Chennai 600004` — the two that survived on real
+  documents — plus post office boxes.
+- **Letterhead websites**: `www.sunrisehospital.org`. This one was not in the
+  plan. It surfaced running a full synthetic letterhead through the pipeline
+  after the name and address rules were in, and it walked past every layer
+  because it is neither a name, an address, nor an `https://` URL. A domain
+  names a hospital as precisely as its letterhead does.
+
+### What deliberately stays
+
+Speciality, department and document type, as the ADR requires: `Department of
+Cardiology`, `Laboratory Report`, `Discharge Summary`, and the `, MBBS, MD,
+Internal Medicine` that trails a redacted clinician name.
+
+### The false positives that shaped the rules
+
+Every facility rule requires a **capitalised proper noun immediately in front of
+the keyword**. Without that, `admitted to hospital` and `Laboratory Report` both
+disappear, and the second is the document type the ADR says to keep.
+
+Four street types that belong in any address list are missing on purpose,
+because each is also a clinical term:
+
+| Excluded | Why                      |
+| -------- | ------------------------ |
+| `Block`  | left bundle branch block |
+| `Circle` | circle of Willis         |
+| `Cross`  | cross-matching           |
+| `St`     | ST-segment elevation     |
+
+Losing a rare address form is recoverable. Deleting a cardiology finding is not.
+`Lab` is excluded for the same reason — `Sample sent to Central Lab` is a
+sentence real reports write.
+
+### Ordering
+
+Facility matching runs **before** the known-value layer, for the reason emails
+do. `Chennai Diagnostics` with `Chennai` as the known city used to come out as
+`[ADDRESS] Diagnostics` — a clipped name rather than a removed one. That was
+recorded as a limitation under P1-06; it is now a regression test.
+
+### The gate
+
+`possible_facility` added, with facility nouns and street types written out
+longhand rather than generated, so a bug in the redactor's pattern builder
+cannot silently be a bug in both. The postcode-in-address rule now also accepts
+five-digit US ZIPs — two of the four real documents were American and neither
+postal code was recognised.
+
+One earlier test changed meaning. The globe-icon case asserted that
+`Commitment. @ www.example-hospital.org` passes the gate untouched; a letterhead
+website is now something the redactor removes, so the raw line no longer passes.
+The regression it actually guards — a stray `@` read as an email address — is
+asserted directly, and the pipeline-level property is asserted separately.
+
+### Result
+
+40 tests added. Backend 369 passing, app 331. On a full synthetic letterhead the
+name, address, phone, website, patient name, MRN and clinician name are all
+removed and the gate passes; the lab table, medications and ECG findings come
+through untouched.
+
+`redaction-v1` → `redaction-v2`. Summaries produced under v1 were processed by
+rules that let facility identity through, which is what the stored version makes
+answerable.
+
+### Still open
+
+Unchanged by this step: handwriting is not usable with Tesseract, and there is
+still no evaluation set — the tests are written from synthetic text, not from
+the real documents.
+
+`Sector 5`-style addresses, where the number follows the street type, are not
+matched. Neither is a facility name with no keyword in it at all — a clinic
+called simply `Ayushman` is invisible to a rule anchored on `Hospital`.

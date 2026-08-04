@@ -308,7 +308,7 @@ describe('the whole synthetic report', () => {
   it('reports a pipeline version so a summary can be traced to its rules', () => {
     const result = service.redact([{ page: 1, text: 'anything' }], SYNTHETIC_PATIENT);
 
-    expect(result.pipelineVersion).toBe('redaction-v1');
+    expect(result.pipelineVersion).toBe('redaction-v2');
   });
 
   it('never returns the values it removed', () => {
@@ -561,4 +561,129 @@ describe('layouts from a lab report, a discharge summary and a photographed pres
 
     expect(redact(table).text).toBe(table);
   });
+});
+
+describe('facility identity', () => {
+  /**
+   * The product decision of 2026-08-04: the content of the report goes to
+   * Sarvam, not where or who created it. ADR-002 § "Names of clinicians and
+   * facilities" required this to be decided before production.
+   *
+   * Every fixture here is synthetic. The layouts are modelled on the four real
+   * documents that exposed the gap, but no text is taken from them.
+   */
+
+  it('removes a hospital name from a letterhead', () => {
+    const { text, counts } = redact('Sunrise Multispeciality Hospital');
+
+    expect(text).not.toContain('Sunrise');
+    expect(text).toContain('[FACILITY]');
+    expect(counts.facility).toBe(1);
+  });
+
+  it('removes an ALL CAPS letterhead, which is how most of them are printed', () => {
+    expect(redact('METROPOLIS DIAGNOSTIC LABORATORIES').text).toBe('[FACILITY]');
+  });
+
+  it('handles punctuation in a facility name', () => {
+    expect(redact("St. Mary's Clinic").text).toBe('[FACILITY]');
+  });
+
+  it('removes a numbered street address with a city, state and ZIP', () => {
+    const { text, counts } = redact('125 Riverbend Drive, Springfield, IL 62704');
+
+    expect(text).toBe('[ADDRESS]');
+    expect(counts.address).toBe(1);
+  });
+
+  it('removes an Indian street address with a PIN code', () => {
+    expect(redact('123 Green Valley Road, Chennai 600004').text).toBe('[ADDRESS]');
+  });
+
+  it('removes a street address that carries no house number', () => {
+    expect(redact('Green Valley Road, Chennai').text).toBe('[ADDRESS]');
+  });
+
+  it('removes a post office box', () => {
+    expect(redact('P.O. Box 4471').text).toBe('[ADDRESS]');
+  });
+
+  it('removes the facility name and its address from one line', () => {
+    const { text } = redact('Sunrise Hospital, 125 Riverbend Drive, Springfield, IL 62704');
+
+    expect(text).toBe('[FACILITY], [ADDRESS]');
+  });
+
+  it('removes a facility name whole rather than clipping it at a known city', () => {
+    // The regression this ordering exists for: the known-city rule used to run
+    // first and leave `[ADDRESS] Diagnostics` — a clipped name, not a removed
+    // one. Facility matching runs before known values for exactly this case.
+    const { text } = redact('Chennai Diagnostics', { city: 'Chennai' });
+
+    expect(text).toBe('[FACILITY]');
+    expect(text).not.toContain('Diagnostics');
+  });
+
+  // --- What must survive ---------------------------------------------------
+  // ADR-002: preserve doctor speciality and document type. A rule that removed
+  // these would be removing the thing the summary is meant to explain.
+
+  it.each([
+    'Department of Cardiology',
+    'Laboratory Report',
+    'Discharge Summary',
+    'Lab No: see original',
+    'Consultant: [PERSON_NAME], MBBS, MD, Internal Medicine',
+    'Referred to Cardiology',
+  ])('leaves document furniture and speciality alone: %s', (line) => {
+    expect(redact(line).text).toBe(line);
+  });
+
+  it.each([
+    'Left Bundle Branch Block noted on ECG',
+    'ST elevation in leads V1-V3',
+    'Circle of Willis is patent',
+    'Cross-matching completed for two units',
+    'Sample sent to Central Lab',
+  ])('does not destroy a clinical phrase that reads like an address: %s', (line) => {
+    expect(redact(line).text).toBe(line);
+  });
+
+  it('leaves a lowercase generic mention of a hospital alone', () => {
+    const line = 'The patient was admitted to hospital overnight.';
+
+    expect(redact(line).text).toBe(line);
+  });
+});
+
+describe('facility websites', () => {
+  it('removes a letterhead website', () => {
+    expect(redact('www.sunrisehospital.org').text).toBe('[FACILITY]');
+  });
+
+  it('removes a bare domain with no www', () => {
+    expect(redact('Visit apollodiagnostics.in for results').text).not.toContain(
+      'apollodiagnostics',
+    );
+  });
+
+  it('removes an email whole before the domain rule can clip it', () => {
+    const { text, counts } = redact('Write to reports@sunrisehospital.org');
+
+    expect(text).toBe('Write to [EMAIL]');
+    expect(counts.email).toBe(1);
+  });
+
+  it('survives the OCR globe icon that used to be read as an email', () => {
+    // `Commitment. @ www.example.org` — a globe glyph OCR'd as `@`. The website
+    // goes; what is left must not look like an address the gate refuses.
+    expect(redact('Commitment. @ www.example.org').text).toBe('Commitment. @ [FACILITY]');
+  });
+
+  it.each(['Hemoglobin 13.8 g/dL', 'HbA1c 5.9 %', 'Platelets 245000 /uL'])(
+    'does not mistake a decimal lab value for a domain: %s',
+    (line) => {
+      expect(redact(line).text).toBe(line);
+    },
+  );
 });
