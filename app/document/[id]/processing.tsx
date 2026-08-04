@@ -8,9 +8,9 @@ import {
   PROCESSING_STAGES,
   PROCESSING_STAGE_LABELS,
   type ProcessingStage,
-  summaryService,
 } from '@/services/ai/summaryService';
-import { uploadService } from '@/services/upload/uploadService';
+import { runDocumentPipeline } from '@/services/processing/documentPipeline';
+import { DocumentProcessingError } from '@/services/processing/types';
 import { useSessionStore } from '@/state/sessionStore';
 import { useVaultStore } from '@/state/vaultStore';
 import { colors, radius, spacing } from '@/theme';
@@ -31,10 +31,12 @@ export default function ProcessingScreen(): React.JSX.Element {
 
   const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
   const documents = useVaultStore((state) => state.documents);
+  const parents = useVaultStore((state) => state.parents);
   const updateDocumentStatus = useVaultStore((state) => state.updateDocumentStatus);
   const addSummary = useVaultStore((state) => state.addSummary);
 
   const document = documents.find((item) => item.id === id);
+  const parent = parents.find((item) => item.id === document?.parentId);
 
   /**
    * A document reached from the timeline has already been through the pipeline.
@@ -48,6 +50,8 @@ export default function ProcessingScreen(): React.JSX.Element {
   const [uploadPercent, setUploadPercent] = useState(alreadyProcessed ? 100 : 0);
   const [stage, setStage] = useState<ProcessingStage>(alreadyProcessed ? 'done' : 'queued');
   const [error, setError] = useState<string | null>(null);
+  /** A privacy stop is not a transient failure, so it must not offer a retry. */
+  const [privacyStop, setPrivacyStop] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const startedRef = useRef(false);
 
@@ -64,36 +68,41 @@ export default function ProcessingScreen(): React.JSX.Element {
     try {
       updateDocumentStatus(document.id, 'uploading', { uploadProgress: 0 });
 
-      const result = await uploadService.uploadDocument({
+      const { summary } = await runDocumentPipeline({
+        document,
+        parent,
         userId,
-        parentId: document.parentId,
-        documentId: document.id,
-        pages: document.pages,
-        onProgress: (progress) => setUploadPercent(progress.percent),
+        onUploadProgress: (percent) => {
+          setUploadPercent(percent);
+          if (percent >= 100) {
+            updateDocumentStatus(document.id, 'uploaded', { uploadProgress: 100 });
+            setPhase('processing');
+          }
+        },
+        onStage: setStage,
         signal: controller.signal,
       });
-
-      await uploadService.completeUpload(document.id, result.objectKeys);
-      updateDocumentStatus(document.id, 'uploaded', { uploadProgress: 100 });
-
-      setPhase('processing');
-      const summary = await summaryService.processDocument(
-        document,
-        (state) => setStage(state.stage),
-        controller.signal,
-      );
 
       addSummary(summary);
       updateDocumentStatus(document.id, 'ready', { summaryId: summary.id, failureReason: null });
       setPhase('ready');
     } catch (caught) {
+      // A pipeline failure carries copy written for a caregiver; a privacy stop
+      // in particular must never show what was found. Anything else falls back
+      // to the message, which on this path comes from our own services.
       const message =
-        caught instanceof Error ? caught.message : 'The document could not be processed.';
+        caught instanceof DocumentProcessingError
+          ? caught.userMessage
+          : caught instanceof Error
+            ? caught.message
+            : 'The document could not be processed.';
+
       setError(message);
       setPhase('failed');
+      setPrivacyStop(caught instanceof DocumentProcessingError && caught.code === 'privacy_failed');
       updateDocumentStatus(document.id, 'failed', { failureReason: message });
     }
-  }, [document, userId, updateDocumentStatus, addSummary]);
+  }, [document, parent, userId, updateDocumentStatus, addSummary]);
 
   useEffect(() => {
     // Fires once per mount. A finished document is left alone rather than
@@ -103,8 +112,18 @@ export default function ProcessingScreen(): React.JSX.Element {
     startedRef.current = true;
 
     void run();
-    return () => abortRef.current?.abort();
   }, [document, alreadyProcessed, run]);
+
+  /**
+   * Cancel only when the screen is actually left.
+   *
+   * This deliberately has no dependencies. The pipeline writes its progress to
+   * the vault as it goes, each write produces a new `document` object, and that
+   * changes `run` — so a cleanup attached to the effect above would fire on the
+   * pipeline's own first status update and abort the upload it had just
+   * started. The user saw "Upload cancelled." at 0%.
+   */
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   if (!document) {
     return (
@@ -140,12 +159,23 @@ export default function ProcessingScreen(): React.JSX.Element {
           </>
         ) : phase === 'failed' ? (
           <>
-            <Button
-              label="Try again"
-              icon="refresh"
-              onPress={() => void run()}
-              testID="processing-retry"
-            />
+            {privacyStop ? (
+              // Retrying a privacy stop just repeats the same refusal. The
+              // useful action is opening the original, which never left the phone.
+              <Button
+                label="Open the original document"
+                icon="document-text-outline"
+                onPress={() => router.replace(`/document/${document.id}`)}
+                testID="processing-open-original"
+              />
+            ) : (
+              <Button
+                label="Try again"
+                icon="refresh"
+                onPress={() => void run()}
+                testID="processing-retry"
+              />
+            )}
             <Button
               label="Back to profile"
               variant="ghost"
@@ -253,7 +283,12 @@ export default function ProcessingScreen(): React.JSX.Element {
       </Card>
 
       {error ? (
-        <Callout tone="danger" title="Could not finish" message={error} testID="processing-error" />
+        <Callout
+          tone="danger"
+          title={privacyStop ? 'Stopped to protect privacy' : 'Could not finish'}
+          message={error}
+          testID="processing-error"
+        />
       ) : null}
 
       <Callout

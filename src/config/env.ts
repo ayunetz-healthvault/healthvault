@@ -106,8 +106,41 @@ export const config: AppConfig = {
 };
 
 /**
- * True when the app should talk to real AWS. Every service module branches on
- * this to pick between its mock and its (not yet written) HTTP implementation.
+ * Hosts an `http://` base URL is tolerated for.
+ *
+ * Loopback and the private ranges a phone reaches a laptop on. Anything else
+ * must be `https://`.
  */
-export const isBackendEnabled = (): boolean =>
-  !config.useMocks && config.api.baseUrl.startsWith('https://');
+const isLocalHost = (host: string): boolean =>
+  host === 'localhost' ||
+  host === '127.0.0.1' ||
+  host === '10.0.2.2' || // Android emulator's alias for the host machine
+  /^10\./.test(host) ||
+  /^192\.168\./.test(host) ||
+  /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+
+/**
+ * True when the app should talk to a real backend rather than its mocks.
+ *
+ * `https://` is always accepted. `http://` is accepted **only** for a loopback
+ * or private-LAN host while `EXPO_PUBLIC_ENV=local`, which is what makes the
+ * Phase 1 development backend reachable at `http://localhost:4000` from the
+ * simulator or `http://192.168.x.x:4000` from a phone on the same wifi.
+ *
+ * That exception is narrow on purpose. Plaintext HTTP to any routable host
+ * would put a scan of somebody's medical record on the wire in the clear, so
+ * the environment flag and the host check both have to agree. A Codespaces
+ * tunnel is `https://` and needs no exception at all.
+ */
+export const isBackendEnabled = (): boolean => {
+  if (config.useMocks) return false;
+
+  const url = config.api.baseUrl;
+
+  if (url.startsWith('https://')) return true;
+
+  if (environment !== 'local' || !url.startsWith('http://')) return false;
+
+  const host = url.slice('http://'.length).split(/[:/]/)[0] ?? '';
+  return isLocalHost(host);
+};
