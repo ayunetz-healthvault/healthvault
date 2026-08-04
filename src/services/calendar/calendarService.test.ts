@@ -1,4 +1,5 @@
 import * as Calendar from 'expo-calendar';
+import { Platform } from 'react-native';
 
 import { calendarService } from './calendarService';
 
@@ -154,5 +155,88 @@ describe('removeEvent', () => {
   it('reports failure without throwing when deletion fails', async () => {
     jest.mocked(Calendar.deleteEventAsync).mockRejectedValueOnce(new Error('gone'));
     await expect(calendarService.removeEvent('event-1')).resolves.toBe(false);
+  });
+});
+
+describe('platforms with no calendar', () => {
+  /**
+   * The browser preview is the case that bit us. `expo-calendar`'s permission
+   * request never settles on web — it neither resolves nor rejects — so the
+   * confirmation dialog span forever with no error and no way out but Cancel.
+   */
+  const onWeb = (): void => {
+    Object.defineProperty(Platform, 'OS', { value: 'web', configurable: true });
+  };
+
+  const onPhone = (): void => {
+    Object.defineProperty(Platform, 'OS', { value: 'ios', configurable: true });
+  };
+
+  afterEach(onPhone);
+
+  it('reports itself unavailable rather than calling the device', async () => {
+    onWeb();
+
+    const result = await calendarService.addFollowUpToCalendar(followUp, parent);
+
+    expect(result.status).toBe('unavailable');
+    // The call that hangs is never reached.
+    expect(Calendar.requestCalendarPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  it('resolves rather than hanging, and does so promptly', async () => {
+    onWeb();
+
+    // A real assertion about the bug: this used to never settle at all.
+    await expect(
+      Promise.race([
+        calendarService.addFollowUpToCalendar(followUp, parent),
+        new Promise((_r, reject) => setTimeout(() => reject(new Error('hung')), 1_000)),
+      ]),
+    ).resolves.toMatchObject({ status: 'unavailable' });
+  });
+
+  it('treats permission as denied without calling the device', async () => {
+    onWeb();
+
+    await expect(calendarService.getPermission()).resolves.toBe('denied');
+    await expect(calendarService.requestPermission()).resolves.toBe('denied');
+    expect(Calendar.requestCalendarPermissionsAsync).not.toHaveBeenCalled();
+  });
+
+  it('says a calendar is available on a phone', () => {
+    onPhone();
+
+    expect(calendarService.isAvailable()).toBe(true);
+  });
+});
+
+describe('a device call that never answers', () => {
+  it('does not strand the caller when looking up permission throws', async () => {
+    jest
+      .mocked(Calendar.getCalendarPermissionsAsync)
+      .mockRejectedValueOnce(new Error('calendar provider crashed'));
+    jest
+      .mocked(Calendar.requestCalendarPermissionsAsync)
+      .mockRejectedValueOnce(new Error('calendar provider crashed'));
+
+    // Previously unguarded: only `createEventAsync` was inside a try/catch, so
+    // a throw here escaped as an unhandled rejection and the spinner stayed up.
+    await expect(calendarService.addFollowUpToCalendar(followUp, parent)).resolves.toMatchObject({
+      status: 'permission_denied',
+    });
+  });
+
+  it('does not strand the caller when finding a calendar throws', async () => {
+    jest
+      .mocked(Calendar.getCalendarPermissionsAsync)
+      .mockResolvedValueOnce({ status: 'granted' } as never);
+    jest
+      .mocked(Calendar.getCalendarsAsync)
+      .mockRejectedValueOnce(new Error('no calendar provider'));
+
+    const result = await calendarService.addFollowUpToCalendar(followUp, parent);
+
+    expect(result.status).toBe('failed');
   });
 });

@@ -47,9 +47,12 @@ export default function FollowUpScreen(): React.JSX.Element {
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [calendarBusy, setCalendarBusy] = useState(false);
-  const [notice, setNotice] = useState<{ tone: 'success' | 'danger'; message: string } | null>(
-    null,
-  );
+  // `info` is for outcomes that are neither a success nor a fault — the web
+  // preview having no calendar, for instance.
+  const [notice, setNotice] = useState<{
+    tone: 'success' | 'danger' | 'info';
+    message: string;
+  } | null>(null);
 
   const followUp = vault.followUps.find((item) => item.id === id);
 
@@ -96,6 +99,13 @@ export default function FollowUpScreen(): React.JSX.Element {
         setNotice({
           tone: 'danger',
           message: 'No calendar on this phone can be written to. Add one and try again.',
+        });
+        break;
+      case 'unavailable':
+        setNotice({
+          tone: 'info',
+          message:
+            'Adding to a calendar only works in the phone app. Everything else about this follow-up is saved.',
         });
         break;
       case 'failed':
@@ -174,11 +184,7 @@ export default function FollowUpScreen(): React.JSX.Element {
       </View>
 
       {notice ? (
-        <Callout
-          tone={notice.tone === 'success' ? 'success' : 'danger'}
-          message={notice.message}
-          testID="followup-notice"
-        />
+        <Callout tone={notice.tone} message={notice.message} testID="followup-notice" />
       ) : null}
 
       <Card tone={overdue ? 'warning' : 'default'} style={styles.whenCard}>

@@ -43,7 +43,52 @@ export type CalendarWriteResult =
   | { status: 'created'; eventId: string; calendarTitle: string }
   | { status: 'permission_denied' }
   | { status: 'no_writable_calendar' }
+  /** This platform has no calendar to write to — the web preview, chiefly. */
+  | { status: 'unavailable' }
   | { status: 'failed'; message: string };
+
+/**
+ * Whether there is a device calendar at all.
+ *
+ * On web there is not, and `expo-calendar`'s permission request never settles
+ * there — it neither resolves nor rejects. Awaiting it leaves the confirmation
+ * dialog spinning forever with no error and no way out but Cancel, which is
+ * exactly what happened in the browser preview.
+ */
+const isCalendarAvailable = (): boolean => Platform.OS === 'ios' || Platform.OS === 'android';
+
+/**
+ * Generous, because a permission prompt waits on a human.
+ *
+ * This is defence in depth rather than the fix for any known bug: a native call
+ * that never returns must not be able to strand the UI indefinitely.
+ */
+const CALL_TIMEOUT_MS = 45_000;
+
+class CalendarTimeoutError extends Error {
+  constructor() {
+    super('The calendar did not respond.');
+    this.name = 'CalendarTimeoutError';
+  }
+}
+
+const withTimeout = async <T>(operation: Promise<T>): Promise<T> => {
+  // The handle is cleared in `finally`, not left to expire. A pending 45-second
+  // timer per call keeps the event loop alive — Jest noticed before a user
+  // would have, but on a phone it is a wakeful app holding a timer for nothing.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new CalendarTimeoutError()), CALL_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
 
 /** Default appointment length; long enough to be useful, short enough to move. */
 const DEFAULT_DURATION_MINUTES = 60;
@@ -51,16 +96,35 @@ const DEFAULT_DURATION_MINUTES = 60;
 const DEFAULT_REMINDER_MINUTES = 24 * 60;
 
 export const calendarService = {
+  /** Whether this device has a calendar the app could write to. */
+  isAvailable(): boolean {
+    return isCalendarAvailable();
+  },
+
   async getPermission(): Promise<CalendarPermission> {
-    const { status } = await Calendar.getCalendarPermissionsAsync();
-    if (status === 'granted') return 'granted';
-    if (status === 'denied') return 'denied';
-    return 'undetermined';
+    if (!isCalendarAvailable()) return 'denied';
+
+    try {
+      const { status } = await withTimeout(Calendar.getCalendarPermissionsAsync());
+      if (status === 'granted') return 'granted';
+      if (status === 'denied') return 'denied';
+      return 'undetermined';
+    } catch {
+      // Treated as denied rather than thrown: a settings screen reading this
+      // must render, not crash.
+      return 'denied';
+    }
   },
 
   async requestPermission(): Promise<CalendarPermission> {
-    const { status } = await Calendar.requestCalendarPermissionsAsync();
-    return status === 'granted' ? 'granted' : 'denied';
+    if (!isCalendarAvailable()) return 'denied';
+
+    try {
+      const { status } = await withTimeout(Calendar.requestCalendarPermissionsAsync());
+      return status === 'granted' ? 'granted' : 'denied';
+    } catch {
+      return 'denied';
+    }
   },
 
   /** Calendars the app is actually allowed to write into. */
@@ -118,38 +182,51 @@ export const calendarService = {
     parent: ParentProfile | undefined,
     calendarId?: string,
   ): Promise<CalendarWriteResult> {
-    let permission = await calendarService.getPermission();
-    if (permission !== 'granted') {
-      permission = await calendarService.requestPermission();
-    }
-    if (permission !== 'granted') return { status: 'permission_denied' };
+    if (!isCalendarAvailable()) return { status: 'unavailable' };
 
-    const targetId = calendarId ?? (await calendarService.getDefaultCalendarId());
-    if (!targetId) return { status: 'no_writable_calendar' };
-
-    const writable = await calendarService.getWritableCalendars();
-    const target = writable.find((calendar) => calendar.id === targetId);
-
-    const preview = calendarService.buildEventPreview(followUp, parent);
-
+    // The whole sequence is guarded, not just the write. Looking up permission
+    // and the default calendar are device calls too, and an unhandled throw in
+    // any of them leaves the caller's spinner running with nothing to show.
     try {
-      const eventId = await Calendar.createEventAsync(targetId, {
-        title: preview.title,
-        startDate: preview.startDate,
-        endDate: preview.endDate,
-        notes: preview.notes,
-        location: preview.location,
-        alarms: [{ relativeOffset: -preview.reminderMinutes }],
-        availability: Calendar.Availability.BUSY,
-        // Appointments are in the parent's local time, which is where the
-        // appointment physically happens.
-        timeZone: 'Asia/Kolkata',
-      });
+      let permission = await calendarService.getPermission();
+      if (permission !== 'granted') {
+        permission = await calendarService.requestPermission();
+      }
+      if (permission !== 'granted') return { status: 'permission_denied' };
+
+      const targetId = calendarId ?? (await calendarService.getDefaultCalendarId());
+      if (!targetId) return { status: 'no_writable_calendar' };
+
+      const writable = await calendarService.getWritableCalendars();
+      const target = writable.find((calendar) => calendar.id === targetId);
+
+      const preview = calendarService.buildEventPreview(followUp, parent);
+
+      const eventId = await withTimeout(
+        Calendar.createEventAsync(targetId, {
+          title: preview.title,
+          startDate: preview.startDate,
+          endDate: preview.endDate,
+          notes: preview.notes,
+          location: preview.location,
+          alarms: [{ relativeOffset: -preview.reminderMinutes }],
+          availability: Calendar.Availability.BUSY,
+          // Appointments are in the parent's local time, which is where the
+          // appointment physically happens.
+          timeZone: 'Asia/Kolkata',
+        }),
+      );
+
       return { status: 'created', eventId, calendarTitle: target?.title ?? 'your calendar' };
     } catch (error) {
       return {
         status: 'failed',
-        message: error instanceof Error ? error.message : 'Could not add the event.',
+        message:
+          error instanceof CalendarTimeoutError
+            ? 'Your calendar did not respond, so nothing was added. Please try again.'
+            : error instanceof Error
+              ? error.message
+              : 'Could not add the event.',
       };
     }
   },
