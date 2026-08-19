@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "stack:up": "docker compose -f docker-compose.yml up -d --wait",
+    "stack:up": "docker compose -f docker-compose.yml up -d --wait && npm run stack:init",
     "stack:down": "docker compose -f docker-compose.yml down",
     "stack:reset": "docker compose -f docker-compose.yml down -v && npm run stack:up",
     "build": "tsc -p tsconfig.build.json",
@@ -19,7 +19,8 @@
     "lint:fix": "eslint . --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm run lint && npm run test"
+    "verify": "npm run typecheck && npm run lint && npm run test",
+    "stack:init": "tsx scripts/initLocalStack.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1113.0",

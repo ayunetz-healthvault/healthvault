@@ -1659,3 +1659,106 @@ skip and the suite stays green). Frontend untouched at 371.
 - The local stack proves wiring, not AWS behaviour. IAM, KMS policies, bucket
   policies, Cognito's flows, Textract's output and `ap-south-1` residency are
   untested by construction — the list is in ADR-003 and the § 10 exit criteria.
+
+---
+
+## P2-04a — the record repository, and tenant isolation
+
+**Done 2026-08-19**
+
+The third port: everything this service stores, on DynamoDB. One implementation
+for both stacks, since DynamoDB Local is DynamoDB's own API.
+
+### Isolation is enforced where it can be tested
+
+ADR-003 records that IAM cannot be exercised locally. The consequence is not
+"test it later" — it is that isolation has to also live somewhere testable.
+
+Every method on `RecordRepository` takes an `ownerId` first, and every key is
+built from it. There is no function in `keys.ts` that can produce a key without
+naming a tenant, and the tenant is only ever a verified token subject — never a
+request body or a path parameter. A missing scope is a type error rather than a
+leak found in review.
+
+Eight tests hold it. Bob asks for every one of Alice's identifiers by name —
+parent, document, summary, processing state, both index queries, the follow-up
+date range — and gets nothing each time. A ninth confirms that Bob deleting
+Alice's ids does not touch her records.
+
+### Two divergences from § 4 of phase-2.md
+
+**Documents are keyed `DOC#<documentId>`, not `DOC#<parentId>#<documentId>`.**
+The plan's shape makes a parent's document list a prefix query but makes "get
+this document" impossible without knowing the parent first — and `endpoints.ts`
+has `/v1/documents/{documentId}`, with no parent in the path. It also means a
+mis-filed document cannot be moved without rewriting its key. A tired caregiver
+adding a report to the wrong parent at 11pm is a real thing; re-filing is now an
+attribute update, and there is a test for exactly that.
+
+**A sparse `GSI1` was added**, which the plan does not have. It carries the
+parent listing, already sorted by document date, and the same index serves
+follow-ups per parent. Only items belonging to a parent set the attributes, so
+the index is not a copy of the table.
+
+Both are recorded in `keys.ts` next to the code they explain.
+
+### The finding
+
+The repository suite failed to connect at all: `UnrecognizedClientException:
+The Access Key ID or security token is invalid`.
+
+**DynamoDB Local validates the access key against the format real AWS keys use
+and rejects anything containing a hyphen.** The local credentials were
+`ayunetz-local`, which MinIO accepted happily, so the object store had been
+working for a whole step against a credential the records container would never
+have taken. The message names nothing useful — it reads like a permissions
+problem, not a formatting one.
+
+Now `ayunetzlocal` / `ayunetzlocalsecret`, aligned across the SDK config and the
+compose file, with the reason written where the constant is defined.
+
+This is the second thing found by running rather than reviewing, and the second
+of a kind ADR-003 predicted: emulators differ from AWS and from each other at
+the edges.
+
+### Also
+
+TTL is enabled on the table but applied to **idempotency markers only**. Nothing
+clinical is ever given one — a record expiring quietly is the wrong failure mode
+for a medical document, and deletion is explicit and audited. DynamoDB Local
+accepts the TTL setting without actually expiring items on schedule, so that
+behaviour is unproven until AWS.
+
+`deleteParent` removes only the parent row and does not cascade. A cascade
+hidden inside the repository would delete medical records with no trace of who
+asked; the caller does it, which is where the audit entry belongs.
+
+Bucket and table creation moved out of a test's `beforeAll` into
+`initialiseLocalStack`, run by `npm run stack:up`. It refuses outright when the
+stack is `aws`, because a service that can create its own buckets is a service
+holding permissions it should not have.
+
+### Tests added
+
+29 (388 → 418, one skipped when the stack is down): parents stored, listed,
+deleted and read back without their storage keys; documents fetched by id alone;
+a parent's documents newest-first; a mis-filed document re-filed; processing
+state carrying a failure code but not the text that caused it; follow-ups read
+as a date range in order; idempotency claims that are per tenant, per operation,
+and hold under eight concurrent retries; and the tenant-isolation block above.
+
+### Verification
+
+`npm run backend:verify` — 416 passing, 2 skipped, 16 files. Run from a clean
+`stack:down && stack:up`, so the bring-up path is proven from nothing. Frontend
+untouched at 371.
+
+### Limitations
+
+- The identity port does not exist yet, so `ownerId` is supplied by callers in
+  tests rather than by a verified token. The isolation tests are real, but the
+  thing that establishes _which_ tenant a request belongs to is still missing.
+- No `/v1` route uses any of this yet.
+- Concurrent-retry idempotency is proven against DynamoDB Local's conditional
+  writes. Conditional writes are the part of DynamoDB Local most likely to be
+  faithful, but it is still an emulator.

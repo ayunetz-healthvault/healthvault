@@ -22,8 +22,8 @@ services:
       - '19090:9000' # S3 API
       - '19091:19091' # web console, for looking at what landed
     environment:
-      MINIO_ROOT_USER: ayunetz-local
-      MINIO_ROOT_PASSWORD: ayunetz-local-secret
+      MINIO_ROOT_USER: ayunetzlocal
+      MINIO_ROOT_PASSWORD: ayunetzlocalsecret
     volumes:
       - objects:/data
     healthcheck:

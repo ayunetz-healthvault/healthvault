@@ -1,8 +1,8 @@
-import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadStackConfig } from '../../src/config/stack.js';
 import { createJobQueue, type ProcessingJob } from '../../src/services/queue/JobQueue.js';
+import { initialiseLocalStack } from '../../src/services/localStack/initialise.js';
 import { createObjectStore, pageKey } from '../../src/services/objects/ObjectStore.js';
 
 /**
@@ -41,14 +41,7 @@ describe.skipIf(!up)('the local stack', () => {
   const written: string[] = [];
 
   beforeAll(async () => {
-    const s3 = new S3Client(config.clients.objects);
-    try {
-      await s3.send(new CreateBucketCommand({ Bucket: config.documentsBucket }));
-    } catch (error) {
-      // Already there from a previous run, which is fine.
-      const name = (error as Error).name;
-      if (name !== 'BucketAlreadyOwnedByYou' && name !== 'BucketAlreadyExists') throw error;
-    }
+    await initialiseLocalStack(config);
   });
 
   afterAll(async () => {
@@ -177,6 +170,10 @@ describe.skipIf(!up)('the local stack', () => {
   });
 
   describe('configuration', () => {
+    it('refuses to create infrastructure on AWS, where the CDK stack owns it', async () => {
+      await expect(initialiseLocalStack({ ...config, name: 'aws' })).rejects.toThrow(/CDK stack/i);
+    });
+
     it('defaults to the local stack, so nothing reaches a real account by accident', () => {
       expect(loadStackConfig({}).name).toBe('local');
     });
@@ -194,7 +191,7 @@ describe.skipIf(!up)('the local stack', () => {
       const { describeStack } = await import('../../src/config/stack.js');
       const described = JSON.stringify(describeStack(config));
 
-      expect(described).not.toContain('ayunetz-local-secret');
+      expect(described).not.toContain('ayunetzlocalsecret');
       expect(described.toLowerCase()).not.toContain('secret');
     });
   });

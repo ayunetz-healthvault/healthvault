@@ -29,10 +29,17 @@ import { z } from 'zod';
  */
 export type StackName = 'local' | 'aws';
 
-/** Credentials for the emulators. Deliberately fixed, and deliberately fake. */
+/**
+ * Credentials for the emulators. Deliberately fixed, and deliberately fake.
+ *
+ * Alphanumeric, with no hyphen, because DynamoDB Local validates the access key
+ * against the format real AWS keys use and rejects anything else with
+ * `UnrecognizedClientException` — a message that says nothing about the actual
+ * cause. MinIO is happy either way; this shape satisfies both.
+ */
 const LOCAL_CREDENTIALS = {
-  accessKeyId: 'ayunetz-local',
-  secretAccessKey: 'ayunetz-local-secret',
+  accessKeyId: 'ayunetzlocal',
+  secretAccessKey: 'ayunetzlocalsecret',
 } as const;
 
 const LOCAL_DEFAULTS = {
