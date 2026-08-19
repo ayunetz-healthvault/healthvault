@@ -145,21 +145,41 @@ describe.skipIf(!up)('the local stack', () => {
       ownerId,
       documentId,
       pageCount: 2,
-      attemptToken: 'attempt_1',
+      // Unique per run. The queue is shared with every other suite touching the
+      // local stack — the `/v1` tests enqueue real jobs onto it — so a test that
+      // assumed the next message was its own would fail whenever the files ran
+      // together. It did, which is how this got written properly.
+      attemptToken: `attempt_${ownerId}`,
+    };
+
+    /** Reads until it finds our message, acknowledging what it takes. */
+    const receiveOwn = async (): Promise<boolean> => {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const batch = await queue.receive(10);
+        let found = false;
+
+        for (const entry of batch) {
+          // Everything taken is acknowledged, ours or not. This is a
+          // development queue and leaving other suites' messages invisible for
+          // the 180 s visibility timeout would be worse than draining them.
+          await queue.acknowledge(entry.receipt);
+          if (entry.job.attemptToken === job.attemptToken) found = true;
+        }
+
+        if (found) return true;
+      }
+      return false;
     };
 
     it('carries a job from sender to worker and acknowledges it', async () => {
       await queue.enqueue(job);
 
-      const received = await queue.receive();
-      expect(received).toHaveLength(1);
-      expect(received[0]?.job).toEqual(job);
-
-      await queue.acknowledge(received[0]!.receipt);
+      expect(await receiveOwn()).toBe(true);
 
       // Acknowledged messages are not redelivered.
-      const after = await queue.receive();
-      expect(after.map((entry) => entry.job.attemptToken)).not.toContain('attempt_1');
+      const after = await queue.receive(10);
+      for (const entry of after) await queue.acknowledge(entry.receipt);
+      expect(after.map((entry) => entry.job.attemptToken)).not.toContain(job.attemptToken);
     });
 
     it('refuses to enqueue anything beyond identifiers', async () => {

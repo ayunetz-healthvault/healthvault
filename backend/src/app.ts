@@ -4,11 +4,19 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { loadConfig, type AppConfig } from './config/env.js';
 import { loadIdentityConfig, type IdentityConfig } from './config/identity.js';
 import { loadStackConfig, type StackConfig } from './config/stack.js';
-import { authentication } from './routes/authentication.js';
+import { installAuthentication } from './routes/authentication.js';
 import { healthRoutes } from './routes/health.js';
 import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
+import { documentRoutes } from './routes/v1/documents.js';
+import { parentRoutes } from './routes/v1/parents.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
+import { createObjectStore, type ObjectStore } from './services/objects/ObjectStore.js';
+import { createJobQueue, type JobQueue } from './services/queue/JobQueue.js';
+import {
+  createRecordRepository,
+  type RecordRepository,
+} from './services/records/RecordRepository.js';
 import { createTokenVerifier, type TokenVerifier } from './services/identity/TokenVerifier.js';
 import { TesseractOcrProvider } from './services/ocr/TesseractOcrProvider.js';
 import { DocumentProcessingOrchestrator } from './services/processing/DocumentProcessingOrchestrator.js';
@@ -21,6 +29,10 @@ export interface BuildAppOptions {
   identity?: IdentityConfig;
   /** Injected so routes can be tested without fetching a JWKS over the wire. */
   verifier?: TokenVerifier;
+  /** Injected so the API can be tested without the local stack running. */
+  repository?: RecordRepository;
+  objects?: ObjectStore;
+  queue?: JobQueue;
   /** Injected so routes can be tested without an OCR engine or AI provider. */
   processor?: DocumentProcessor;
   /**
@@ -75,6 +87,7 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
   app.decorate('config', config);
   app.decorate('stack', stack);
 
+
   app.register(multipart, {
     limits: {
       fileSize: config.MAX_PAGE_BYTES,
@@ -100,12 +113,22 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
     localKeys = inProcessKeys(issuer);
   }
 
-  app.register(authentication, {
+  // Synchronously, before any route can be registered — including one added
+  // straight onto this instance rather than through a plugin.
+  installAuthentication(app, {
     verifier: options.verifier ?? createTokenVerifier(identity, localKeys),
   });
-
   app.register(healthRoutes);
   app.register(processDocumentRoutes, { processor });
+
+  app.register(async (v1) => {
+    const repository = options.repository ?? createRecordRepository(stack);
+    const objects = options.objects ?? createObjectStore(stack);
+    const queue = options.queue ?? createJobQueue(stack);
+
+    await v1.register(parentRoutes, { repository });
+    await v1.register(documentRoutes, { repository, objects, queue });
+  });
 
   /**
    * Single exit point for errors.

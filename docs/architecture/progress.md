@@ -30,6 +30,7 @@ the intent and do not change as work lands. This file is the record.
 | P2-00   | The local stack, and the first two ports  | Done — 2026-08-19                |
 | P2-04a  | Record repository and tenant isolation    | Done — 2026-08-19                |
 | P2-03a  | Identity port and local issuer            | Done — 2026-08-19                |
+| P2-05a  | The /v1 API: parents, documents, uploads  | Done — 2026-08-19                |
 | Phase 2 | Cloud platform                            | Building locally — see ADR-003   |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
@@ -1875,3 +1876,111 @@ at 371.
   inside the test. Wiring the API is the next step.
 - The mobile app still has a mock `authService` and does not obtain a token
   from anywhere.
+
+---
+
+## P2-05a — the `/v1` API
+
+**Done 2026-08-19**
+
+`endpoints.ts` has described this contract since Phase 1 with nothing serving
+it. Parents, documents and the upload protocol now do, against all four ports
+together: a verified caller, records in DynamoDB, presigned PUTs to the object
+store, and a job on the queue.
+
+The upload flow has three steps rather than one, on purpose:
+
+```text
+POST /v1/documents                       record first, so nothing is uploaded
+                                         that has nowhere to live
+POST /v1/documents/:id/uploads           short-lived presigned PUT per page
+PUT  <presigned url>                     phone -> object store, directly
+POST /v1/documents/:id/uploads/complete  verify every page, then enqueue
+```
+
+Document bytes never pass through this service.
+
+### A route cannot forget authentication
+
+Forgetting a `preHandler` looks exactly like working code, and what it exposes
+is one family's medical records to anyone who can guess a URL. So it is a
+startup failure: an `onRoute` hook refuses to register any `/v1` route without
+an authentication handler, with an allow-list for deliberate exceptions that is
+currently empty.
+
+**The first version of the guard did not work, and the test for it did not
+notice.** The guard was a plugin, so its hook was added at `ready()` — after
+routes registered directly on the instance had already gone in. It happened to
+cover the real routes, because those are registered through `register()` and are
+therefore deferred too. Both authentication and the guard are now installed
+synchronously in `buildApp`, before anything can register.
+
+Confirmed twice by deleting a `preHandler` from a real route and watching the
+whole suite fail to boot with the route named.
+
+### Decisions worth recording
+
+**Not yours and does not exist give the same answer.** Byte-identical 404s,
+asserted by a test that compares the two responses. A different answer would
+turn every endpoint taking an id into a way to test whether that id exists in
+somebody else's records.
+
+**`complete` verifies every page is actually in the store.** A client that says
+"done" with a page missing would otherwise queue a job that reads an incomplete
+document and produces a summary missing whatever was on that page — a silent
+wrong answer about a medical record, which is worse than a failed upload.
+
+**`complete` is idempotent.** A phone on a train retries; the second attempt is
+told the job is already queued rather than queuing a duplicate, which would
+summarise the same document twice and, once P2-14 lands, create the same
+reminder twice.
+
+**Deleting a parent refuses while documents remain**, rather than cascading.
+Removing somebody's medical records should not be a side effect of tidying up a
+profile.
+
+**Deleting a document removes pages before the record.** A record with no pages
+is a fixable inconsistency; pages with no record are orphans nothing will ever
+clean up, because the thing that knew their keys is gone.
+
+**`callerOf(request)` throws rather than returning null.** Reaching a handler
+with no caller means the guards were bypassed, and there is nothing safe to do
+at that point.
+
+### Also found
+
+The suite went red once the `/v1` tests existed: they enqueue real jobs, and the
+older queue test assumed the next message on the queue was its own. Shared local
+infrastructure means suites can see each other's work — that one now looks for
+its own token and drains what it takes. Three consecutive full runs are stable.
+
+### Tests added
+
+25 (464 → 489, three skipped without the stack). Every registered `/v1` route
+enumerated and asserted to answer 401 with no token; the boot guard accepting a
+declared route, rejecting an undeclared one, rejecting an unrelated preHandler,
+and ignoring routes outside `/v1`; parents created, read, patched without
+blanking unsent fields, and refused deletion while documents remain; a document
+carried from record to queued job through real presigned PUTs; an incomplete
+upload refused with the missing page named; a retried `complete` not queuing
+twice; page-count and content-type mismatches refused; filing a document against
+another caller's parent refused; and one caller reaching for another's parent,
+document, processing state and summary — each a 404 byte-identical to a record
+that does not exist.
+
+### Verification
+
+`npm run backend:verify` — 486 passing, 3 skipped, 19 files. Run three times to
+confirm the shared-queue fix holds. Frontend untouched at 371.
+
+### Limitations
+
+- Nothing consumes the queue. A document reaches `queued` and stays there; the
+  worker is the next step, and until it exists no summary is ever produced
+  through this path.
+- Follow-ups, account and export endpoints are not built. The repository
+  supports follow-ups already.
+- The mobile app still talks to the Phase 1 `/dev/process-document` endpoint and
+  has never called `/v1`.
+- `fastify-plugin` was added and then removed when authentication became
+  synchronous.

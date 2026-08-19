@@ -52,8 +52,8 @@ export interface ParentRecord {
   readonly parentId: string;
   readonly fullName: string;
   readonly relationship: string;
-  readonly dateOfBirth?: string;
-  readonly city?: string;
+  readonly dateOfBirth?: string | undefined;
+  readonly city?: string | undefined;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -83,7 +83,7 @@ export interface ProcessingRecord {
   readonly status: ProcessingStatus;
   readonly attempts: number;
   /** Technical code only. Never the text that caused it — see ADR-001. */
-  readonly failureCode?: string;
+  readonly failureCode?: string | undefined;
   readonly updatedAt: string;
 }
 

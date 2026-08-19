@@ -1,5 +1,4 @@
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import fp from 'fastify-plugin';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import {
   TokenRejected,
@@ -34,11 +33,66 @@ const UNAUTHORIZED_BODY = {
   retryable: false,
 } as const;
 
-const plugin: FastifyPluginAsync<AuthenticationOptions> = async (app, options) => {
+/**
+ * Paths under `/v1` that are deliberately public.
+ *
+ * An allow-list rather than a convention, so making a route public is a visible
+ * edit to this file that a reviewer will see.
+ */
+const PUBLIC_V1_ROUTES = new Set<string>([]);
+
+/**
+ * Refuses to boot if a `/v1` route was registered without authentication.
+ *
+ * Forgetting a `preHandler` is the easiest possible mistake here, it looks
+ * exactly like working code, and the thing it exposes is one family's medical
+ * records to anyone who can guess a URL. A convention that every handler
+ * remembers is not good enough; this makes it a startup failure instead.
+ *
+ * Applied **synchronously**, not as a plugin. An `onRoute` hook only sees
+ * routes registered after it is added, and a plugin's body does not run until
+ * `ready()` — so a route added straight onto the root instance would be
+ * registered first and slip past. That is not how the real routes are added,
+ * which is why it took a deliberately awkward test to notice.
+ */
+export const guardV1Authentication = (app: FastifyInstance): void => {
+  app.addHook('onRoute', (route) => {
+    if (!route.url.startsWith('/v1/') && route.url !== '/v1') return;
+    if (PUBLIC_V1_ROUTES.has(route.url)) return;
+    // HEAD is registered automatically alongside GET and inherits its handlers.
+    if (route.method === 'HEAD') return;
+
+    const preHandlers = [route.preHandler].flat().filter(Boolean);
+    const authenticated = preHandlers.some(
+      (handler) => (handler as { isAyunetzAuth?: boolean }).isAyunetzAuth === true,
+    );
+
+    if (!authenticated) {
+      throw new Error(
+        `Route ${String(route.method)} ${route.url} has no authentication. Add { preHandler: app.authenticate } or list it in PUBLIC_V1_ROUTES.`,
+      );
+    }
+  });
+};
+
+/**
+ * Installs authentication, synchronously.
+ *
+ * Not a plugin. A plugin's body does not run until `ready()`, which would mean
+ * `app.authenticate` did not exist while routes were being declared and the
+ * route guard below had not been installed when the first route registered.
+ * Both need to be true before anything else happens, so both happen here.
+ */
+export const installAuthentication = (app: FastifyInstance, options: AuthenticationOptions): void => {
   app.decorateRequest('caller', null);
 
-  app.decorate(
-    'requireCaller',
+  /**
+   * Marked so the `/v1` guard can recognise it on a registered route. A plain
+   * function reference would work until somebody wraps it in an arrow, which is
+   * exactly the sort of harmless-looking edit that would silently disable the
+   * check.
+   */
+  const authenticate = Object.assign(
     async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
       try {
         request.caller = await options.verifier.fromAuthorizationHeader(
@@ -67,13 +121,25 @@ const plugin: FastifyPluginAsync<AuthenticationOptions> = async (app, options) =
         });
       }
     },
+    { isAyunetzAuth: true as const },
   );
+
+  app.decorate('authenticate', authenticate);
+  // Kept as the older name so existing call sites and tests still read well.
+  app.decorate('requireCaller', authenticate);
+
+  guardV1Authentication(app);
 };
 
-export const authentication = fp(plugin, { name: 'authentication' });
+
+
 
 declare module 'fastify' {
   interface FastifyInstance {
+    /** Use this as a route's `preHandler`. The `/v1` guard looks for it. */
+    authenticate: ((request: FastifyRequest, reply: FastifyReply) => Promise<void>) & {
+      isAyunetzAuth: true;
+    };
     requireCaller: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 
