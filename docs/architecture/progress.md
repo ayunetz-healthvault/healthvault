@@ -29,6 +29,7 @@ the intent and do not change as work lands. This file is the record.
 | ADR-003 | Local and cloud parity                    | Accepted — 2026-08-19            |
 | P2-00   | The local stack, and the first two ports  | Done — 2026-08-19                |
 | P2-04a  | Record repository and tenant isolation    | Done — 2026-08-19                |
+| P2-03a  | Identity port and local issuer            | Done — 2026-08-19                |
 | Phase 2 | Cloud platform                            | Building locally — see ADR-003   |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
@@ -1763,3 +1764,114 @@ untouched at 371.
 - Concurrent-retry idempotency is proven against DynamoDB Local's conditional
   writes. Conditional writes are the part of DynamoDB Local most likely to be
   faithful, but it is still an emulator.
+
+---
+
+## P2-03a — the identity port, and where the tenant comes from
+
+**Done 2026-08-19**
+
+The repository could scope every query by tenant but nothing established which
+tenant a request belonged to. This closes that: a bearer token becomes
+`request.caller`, and `caller.ownerId` is the subject of a verified token and
+nothing else.
+
+One verifier serves both stacks. A local issuer and a Cognito user pool are both
+JWKS endpoints, so only the issuer URL and key source differ — the same result
+as the other ports.
+
+### The mutation test, and what it found
+
+The verifier passed 29 tests including `alg: none` and RSA-key-as-HMAC-secret.
+Deleting the algorithm allow-list from the implementation left **all 29 still
+passing**.
+
+Both forgery tests were green for the wrong reason: an RSA key set will not
+resolve a key for `HS256` or for `none`, so `jose` refuses those anyway. The
+allow-list — the control the tests claimed to be exercising — was doing nothing
+observable.
+
+It is still correct to keep: it is what protects if the key set ever gains a
+symmetric key, or if key resolution is ever replaced with something more
+permissive. So there is now a test with a key source that hands back whatever
+key the header asks for, which is exactly that future. Removing the allow-list
+fails that one test and nothing else, which is what a control being tested
+looks like.
+
+Four other claim tests had the same defect and were rewritten: expiry, issuer,
+audience and `token_use` were each signed with an unrelated key, so they failed
+on the signature rather than the claim they named. They now sign with a key the
+verifier genuinely trusts and assert the specific rejection reason.
+
+### Two bugs found by running it
+
+**A JWKS fetch failure was reported as a bad token.** Every failure inside
+verification became a 401, so an identity-provider outage would have told every
+user at once that their session had ended and sent them to sign in again —
+which fails too, because the thing that verifies sign-ins is what is down. Now
+`IdentityUnavailable` is distinct from `TokenRejected`, and an outage is a 503
+marked retryable.
+
+**The service fetched its own JWKS over HTTP to verify a token it had just
+signed.** Which meant perfectly good tokens were refused whenever nothing was
+listening on the port. On the local stack the verifier now resolves keys from
+the in-process issuer. The published endpoint stays, because it mirrors
+Cognito's shape.
+
+### Decisions worth recording
+
+**A refusal says nothing.** Whether a token expired, was signed by the wrong
+key, or was minted for another app client is useful to somebody refining a
+forgery and useless to a legitimate client, which can only do one thing about a
+401 either way. The reason is logged; the body is a flat sentence.
+
+**A rejected token never reaches the log.** It is still a credential, and a log
+line is a durable copy of one. The reason is logged, never the token — asserted
+by a test that captures the log stream.
+
+**`token_use` is checked.** A Cognito access token and ID token are both validly
+signed by the same pool. Accepting either where one was meant would take a token
+issued for a different purpose.
+
+**A token with no `exp` is refused.** `jose` only enforces expiry when the claim
+is present, so without this check a token without one would never expire.
+
+**Clock tolerance is 5 s.** A generous skew extends the life of every token past
+its stated expiry, including a stolen one.
+
+**Three guards keep the development issuer away from anything real**, because
+`POST /local-identity/token` mints a valid token for whoever asks — on a system
+with real records that is not an authentication bypass so much as the absence of
+authentication. `createLocalIssuer` throws on `aws`, the routes refuse to
+register on `aws`, and `app.ts` only mounts them when the stack is `local`. Any
+single guard could be removed by somebody refactoring in good faith.
+
+### Tests added
+
+46 (418 → 464, two skipped). 30 unit tests on the verifier — forgery by
+substituted key, `alg: none`, HMAC confusion, an edited payload, the allow-list
+test above, and claim-by-claim rejection with the reason asserted. 16 through
+the running server — a caller reaching a handler, a request body claiming a
+different owner changing nothing, five malformed header shapes, a genuinely
+expired token against a zero-tolerance instance, the 503 outage path, a flat
+401 body, and the log carrying a reason but no token.
+
+The `aws` guards were also exercised directly, outside the suite: the issuer
+refuses to construct and the routes refuse to register.
+
+### Verification
+
+`npm run backend:verify` — 462 passing, 2 skipped, 18 files. Frontend untouched
+at 371.
+
+### Limitations
+
+- Cognito's own flows are untested and untestable here: sign-up, email
+  verification, password policy, recovery, refresh, token lifetimes. ADR-003
+  lists them; the Phase 2 gate has to cover them on real AWS.
+- The `aws` verifier path has still never run. It is the same code, but the
+  JWKS fetch against a real Cognito pool has not happened.
+- No `/v1` route uses `requireCaller` yet — the only route that does is defined
+  inside the test. Wiring the API is the next step.
+- The mobile app still has a mock `authService` and does not obtain a token
+  from anywhere.

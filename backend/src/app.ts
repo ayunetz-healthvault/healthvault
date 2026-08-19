@@ -2,8 +2,14 @@ import multipart from '@fastify/multipart';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { loadConfig, type AppConfig } from './config/env.js';
+import { loadIdentityConfig, type IdentityConfig } from './config/identity.js';
+import { loadStackConfig, type StackConfig } from './config/stack.js';
+import { authentication } from './routes/authentication.js';
 import { healthRoutes } from './routes/health.js';
+import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
+import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
+import { createTokenVerifier, type TokenVerifier } from './services/identity/TokenVerifier.js';
 import { TesseractOcrProvider } from './services/ocr/TesseractOcrProvider.js';
 import { DocumentProcessingOrchestrator } from './services/processing/DocumentProcessingOrchestrator.js';
 import { createSummaryProvider } from './services/summarisation/providerFactory.js';
@@ -11,6 +17,10 @@ import { ProcessingError, type DocumentProcessor } from './types/processing.js';
 
 export interface BuildAppOptions {
   config?: AppConfig;
+  stack?: StackConfig;
+  identity?: IdentityConfig;
+  /** Injected so routes can be tested without fetching a JWKS over the wire. */
+  verifier?: TokenVerifier;
   /** Injected so routes can be tested without an OCR engine or AI provider. */
   processor?: DocumentProcessor;
   /**
@@ -34,6 +44,8 @@ export interface BuildAppOptions {
  */
 export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
   const config = options.config ?? loadConfig();
+  const stack = options.stack ?? loadStackConfig();
+  const identity = options.identity ?? loadIdentityConfig(stack.name, stack.region);
   const processor =
     options.processor ??
     new DocumentProcessingOrchestrator({
@@ -61,6 +73,7 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
   });
 
   app.decorate('config', config);
+  app.decorate('stack', stack);
 
   app.register(multipart, {
     limits: {
@@ -71,6 +84,24 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
       fieldSize: 4096,
       fields: 40,
     },
+  });
+
+  /**
+   * The development identity provider, and only on the local stack.
+   *
+   * `createLocalIssuer` refuses on `aws` and so does `localIdentityRoutes`, so
+   * this condition is the outermost of three guards rather than the only one.
+   */
+  let localKeys: ReturnType<typeof inProcessKeys> | undefined;
+
+  if (stack.name === 'local') {
+    const issuer = createLocalIssuer(identity, stack.name);
+    app.register(localIdentityRoutes, { issuer, stack: stack.name });
+    localKeys = inProcessKeys(issuer);
+  }
+
+  app.register(authentication, {
+    verifier: options.verifier ?? createTokenVerifier(identity, localKeys),
   });
 
   app.register(healthRoutes);
@@ -109,5 +140,6 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
 declare module 'fastify' {
   interface FastifyInstance {
     config: AppConfig;
+    stack: StackConfig;
   }
 }

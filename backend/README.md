@@ -146,3 +146,40 @@ in ADR-003 and § 10 of [phase-2.md](../docs/architecture/phase-2.md).
 loudly, with the command to start them — when they are not up. It is written
 against the ports rather than the drivers, so the same file becomes the
 acceptance suite for the AWS stack on the day an account exists.
+
+## Signing in locally
+
+The local stack has a development identity provider standing in for a Cognito
+user pool. It exists to prove the thing that matters — that the API refuses a
+token it did not issue, and scopes every query by the subject of one it did.
+
+```bash
+curl -s -X POST http://localhost:4000/local-identity/token \
+  -H 'Content-Type: application/json' \
+  -d '{"ownerId":"owner_alice"}'
+```
+
+Then send the token as `Authorization: Bearer <token>`. Keys are generated per
+process and never written down, so restarting the server invalidates every
+token — mildly annoying, and much better than a signing key sitting in the
+repository waiting to be copied into something real.
+
+**It mints a valid token for whoever asks.** Three separate guards keep it away
+from anything real: `createLocalIssuer` throws on the `aws` stack, the routes
+refuse to register on the `aws` stack, and `app.ts` only mounts them when the
+stack is `local`. Three guards for one rule is deliberate — any single one could
+be removed by somebody refactoring in good faith.
+
+### Switching to Cognito
+
+```bash
+AYUNETZ_STACK=aws
+AYUNETZ_COGNITO_USER_POOL_ID=ap-south-1_XXXXXXXXX
+AYUNETZ_IDENTITY_AUDIENCE=<app client id>
+```
+
+The issuer and JWKS URL are derived from the pool. The verifier is the same
+code either way — a local issuer and a Cognito pool are both JWKS endpoints —
+so nothing else changes. What is _not_ proven by any of this is Cognito's own
+flows: sign-up, email verification, recovery, refresh and token lifetimes. See
+ADR-003.
