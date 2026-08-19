@@ -18,6 +18,8 @@
     "verify": "npm run typecheck && npm run lint && npm run test",
     "backend:install": "npm --prefix backend install",
     "backend:dev": "npm --prefix backend run dev",
+    "stack:up": "npm --prefix backend run stack:up",
+    "stack:down": "npm --prefix backend run stack:down",
     "backend:verify": "npm --prefix backend run verify"
   },
   "dependencies": {

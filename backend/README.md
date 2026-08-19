@@ -97,3 +97,52 @@ numbering.
 The shape is fixed. It reports nothing about configuration, dependencies or
 whether a model key is present — an unauthenticated endpoint answering "is the
 AI key set?" is a reconnaissance tool.
+
+## The local stack
+
+Phase 2 depends on S3, DynamoDB and SQS. None of that needs an AWS account to
+develop against — MinIO speaks S3, DynamoDB Local _is_ DynamoDB's API, and
+ElasticMQ speaks SQS, so the same code runs against both. See
+[ADR-003](../docs/architecture/adr/003-local-cloud-parity.md).
+
+```bash
+npm run stack:up
+```
+
+That waits for all three to report healthy. `npm run stack:down` stops them and
+`npm run stack:reset` throws the data away and starts again.
+
+| Container | Stands in for | Port    | Also               |
+| --------- | ------------- | ------- | ------------------ |
+| `objects` | S3            | `19090` | console on `19091` |
+| `records` | DynamoDB      | `19092` |                    |
+| `queue`   | SQS + DLQ     | `19093` | web UI on `19094`  |
+
+Ports are non-default on purpose: medical records are not worth mixing up with
+whatever else is listening on `9000` or `8000`.
+
+### Choosing a stack
+
+```bash
+AYUNETZ_STACK=local   # the containers above. The default.
+AYUNETZ_STACK=aws     # real services, ambient credential chain
+```
+
+The default is `local`, so a checkout with nothing configured cannot reach a
+real account. The mobile application takes no part in this choice — it knows a
+base URL, and what is behind it is this service's business.
+
+### What the local stack does not prove
+
+Running green here is not the same as working on AWS. It says nothing about
+IAM, KMS key policies, S3 bucket policies, Cognito's own flows, Textract's real
+output, or whether objects are physically in `ap-south-1` — which is the claim
+the app makes to users. The full list, and the exit criteria that cover it, are
+in ADR-003 and § 10 of [phase-2.md](../docs/architecture/phase-2.md).
+
+### Tests
+
+`test/integration/localStack.test.ts` runs against the containers and skips —
+loudly, with the command to start them — when they are not up. It is written
+against the ports rather than the drivers, so the same file becomes the
+acceptance suite for the AWS stack on the day an account exists.

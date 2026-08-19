@@ -12,10 +12,10 @@ documents state the intent and do not change as work lands.
 
 The architecture is divided into two delivery phases:
 
-| Phase | Objective | Runtime | Permitted data |
-|---|---|---|---|
-| [Phase 1](./phase-1.md) | Prove the complete privacy-first document-processing flow and connect it to the existing Expo application | GitHub Codespaces or another controlled development environment | Synthetic documents only |
-| [Phase 2](./phase-2.md) | Build the authenticated, encrypted and asynchronous cloud platform with document storage, OCR, AI summaries, consolidation and reminders | AWS India region plus an approved external AI provider | Real data only after security, privacy, legal and operational acceptance |
+| Phase                   | Objective                                                                                                                                | Runtime                                                         | Permitted data                                                           |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| [Phase 1](./phase-1.md) | Prove the complete privacy-first document-processing flow and connect it to the existing Expo application                                | GitHub Codespaces or another controlled development environment | Synthetic documents only                                                 |
+| [Phase 2](./phase-2.md) | Build the authenticated, encrypted and asynchronous cloud platform with document storage, OCR, AI summaries, consolidation and reminders | AWS India region plus an approved external AI provider          | Real data only after security, privacy, legal and operational acceptance |
 
 ## Existing application
 
@@ -64,7 +64,9 @@ src/config/
 13. Logs contain technical metadata only.
 14. Logs must never contain document bytes, OCR text, redacted text, prompts, model responses, names, addresses, access tokens, secret values or presigned URLs.
 15. Temporary processing artefacts are deleted after success and failure.
-16. Mock mode remains available for tests and demonstrations.
+16. A demonstration build is available for showing the product, is chosen at
+    build time, and can never reach a backend. It is not a test double — tests
+    run against ports, not against it. See [ADR-003](./adr/003-local-cloud-parity.md).
 17. Phase 1 uses synthetic medical documents only.
 18. Real medical data is not permitted until Phase 2 exit controls are approved.
 
@@ -235,13 +237,15 @@ For every step, the agent must:
 8. Review `git diff`.
 9. Search the diff for secrets and accidental document content.
 10. Report:
-   - files created
-   - files modified
-   - design decisions
-   - tests added
-   - commands run
-   - limitations
-   - security and privacy implications
+
+- files created
+- files modified
+- design decisions
+- tests added
+- commands run
+- limitations
+- security and privacy implications
+
 11. Stop for review.
 12. Do not start the next numbered step automatically.
 13. Do not commit or push unless explicitly instructed.
@@ -265,3 +269,4 @@ A step is complete only when:
 
 - [ADR-001 — AI data boundary](./adr/001-ai-data-boundary.md)
 - [ADR-002 — PII redaction and leakage strategy](./adr/002-pii-redaction-strategy.md)
+- [ADR-003 — Local and cloud parity through ports and drivers](./adr/003-local-cloud-parity.md)

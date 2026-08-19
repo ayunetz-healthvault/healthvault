@@ -1061,3 +1061,83 @@ Before implementation or launch, reconfirm:
 - breach-notification process
 - support access model
 - manual-review policy
+
+## 10. Amendment — the local-parity track
+
+**Added 2026-08-19.** Sections 1–9 above are unchanged and remain the target.
+This section records a change in how Phase 2 is built, decided in
+[ADR-003](./adr/003-local-cloud-parity.md).
+
+### Why
+
+There is no AWS account, and the route to one runs through a commercial
+decision. Every step below P2-01 that is really about the product — the data
+model, the upload protocol, the processing states, consolidation, export,
+deletion — has nothing to do with which cloud runs it, and should not wait.
+
+### How
+
+Each cloud dependency sits behind a port with a local driver and an AWS driver,
+selected in the backend from `AYUNETZ_STACK=local|aws`. The local set runs in
+Docker with no cloud credentials: DynamoDB Local, MinIO, ElasticMQ, and a local
+JWT issuer. The integration suite is written against the ports and run against
+both driver sets, so it becomes the acceptance test for the AWS stack on the day
+an account exists.
+
+The mobile application takes no part in this. It knows a base URL and an auth
+issuer; the stack behind them is not its concern.
+
+### What each step can reach without an account
+
+| Step  | Locally buildable | Note                                                                         |
+| ----- | ----------------- | ---------------------------------------------------------------------------- |
+| P2-01 | Most              | `cdk synth`, snapshot tests and `cdk-nag` need no account; `cdk deploy` does |
+| P2-02 | Partly            | Envelope-encryption paths run; key policies and grants do not                |
+| P2-03 | Structure only    | Local JWT issuer proves authorisation, not Cognito's flows                   |
+| P2-04 | Yes               | DynamoDB Local is the real API                                               |
+| P2-05 | Yes               | Presigned PUT against MinIO is the same code path                            |
+| P2-06 | Yes               | ElasticMQ gives real visibility timeouts and redrive                         |
+| P2-07 | Structure only    | Adapter written against fixtures; accuracy unknown                           |
+| P2-08 | Yes               | Phase 1 code, moved behind the queue                                         |
+| P2-09 | Yes               | As above                                                                     |
+| P2-10 | Yes               | As above                                                                     |
+| P2-11 | Yes               | As above                                                                     |
+| P2-12 | Yes               |                                                                              |
+| P2-13 | Yes               |                                                                              |
+| P2-14 | Yes               |                                                                              |
+| P2-15 | Partly            | Push works without AWS; SNS and Pinpoint do not                              |
+| P2-16 | Yes               |                                                                              |
+| P2-17 | Little            | Logs and metrics ports only; alarms are cloud-side                           |
+| P2-18 | Little            | Needs an account to deploy anything                                          |
+
+### Additions to the section 8 exit criteria
+
+The criteria above assume everything was built against AWS. Under this track it
+was not, so the gate must also confirm — **on real AWS, not locally**:
+
+- the integration suite passes against the `aws` driver set
+- IAM enforces tenant isolation, tested by attempting cross-tenant access with a
+  real scoped credential
+- Textract output passes the redaction and leakage rules on real documents
+- Cognito's own flows work: sign-up, email verification, recovery, refresh
+- KMS key policies and grants are as intended, and S3 Block Public Access holds
+- objects are physically in `ap-south-1`, which is the claim made to users
+- log retention and S3 lifecycle rules are set on every resource that produces
+  data
+
+### Carried forward from Phase 1
+
+Phase 1's exit criterion "no real patient data has been used" was **not met** —
+four real documents were used to find redaction failures, none committed, all
+regression tests written from synthetic text. That is recorded honestly in
+[progress.md](./progress.md) and is inherited here rather than treated as
+passed. Phase 2's own data rules are unchanged: real data only after security,
+privacy, legal, provider-contract and operational acceptance.
+
+### Managed-services partner
+
+If the AWS account is administered by a partner rather than directly, that
+partner is a data processor with access to the environment holding medical
+records. Before any production data exists, this requires a processor agreement,
+scoped and time-limited access rather than standing administrator rights, a
+break-glass procedure, and audit logging of partner activity. Add to section 9.

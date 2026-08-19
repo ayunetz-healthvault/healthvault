@@ -1,0 +1,82 @@
+# The local stand-in for the AWS services Phase 2 depends on.
+#
+# Nothing here needs a cloud account, a credential, or a network beyond pulling
+# the images once. See ../docs/architecture/adr/003-local-cloud-parity.md for
+# which service each container stands in for, and — more importantly — what it
+# does not prove.
+#
+#   docker compose -f backend/docker-compose.yml up -d
+#
+# Ports are deliberately non-default. Health records are not worth mixing up
+# with whatever else is listening on 9000 or 8000 on a developer's machine.
+
+name: ayunetz-local
+
+services:
+  # Stands in for: S3. Speaks the S3 protocol, including presigned PUT, so the
+  # upload path is the same code with a different endpoint.
+  objects:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":19091"
+    ports:
+      - '19090:9000' # S3 API
+      - '19091:19091' # web console, for looking at what landed
+    environment:
+      MINIO_ROOT_USER: ayunetz-local
+      MINIO_ROOT_PASSWORD: ayunetz-local-secret
+    volumes:
+      - objects:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # Stands in for: DynamoDB. The real API, so key schemas, GSIs, conditional
+  # writes and pagination behave as they will on AWS.
+  #
+  # `-sharedDb` keeps every client on one database file rather than splitting by
+  # credential, which is what makes the seed script and the app see the same
+  # tables.
+  records:
+    image: amazon/dynamodb-local:2.5.2
+    command: ['-jar', 'DynamoDBLocal.jar', '-sharedDb', '-dbPath', '/data']
+    working_dir: /home/dynamodblocal
+    user: root
+    ports:
+      - '19092:8000'
+    volumes:
+      - records:/data
+    healthcheck:
+      # DynamoDB Local answers an unsigned request with a 400 and a JSON error,
+      # which is enough to prove the port is serving rather than merely open.
+      test:
+        [
+          'CMD-SHELL',
+          "curl -s -o /dev/null -w '%{http_code}' http://localhost:8000 | grep -q '400'",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  # Stands in for: SQS. Real visibility timeouts, real redrive to a dead-letter
+  # queue — the failure behaviour P2-06 has to get right.
+  queue:
+    image: softwaremill/elasticmq-native:1.6.11
+    ports:
+      - '19093:9324' # SQS API
+      - '19094:9325' # web UI
+    volumes:
+      - ./local/elasticmq.conf:/opt/elasticmq.conf:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://localhost:9325 > /dev/null 2>&1 || exit 1']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  objects:
+  records:

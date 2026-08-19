@@ -9,24 +9,26 @@ the intent and do not change as work lands. This file is the record.
 
 ## Status at a glance
 
-| Step    | Title                                     | State                               |
-| ------- | ----------------------------------------- | ----------------------------------- |
-| P1-01   | Architecture contracts                    | Done — 2026-08-02                   |
-| P1-02   | Extend domain contracts                   | Done — 2026-08-02                   |
-| P1-03   | Backend project skeleton                  | Done — 2026-08-02                   |
-| P1-04   | Secure temporary upload handling          | Done — 2026-08-02                   |
-| P1-05   | OCR provider abstraction                  | Done — 2026-08-02                   |
-| P1-06   | Profile-aware deterministic PII redaction | Done — 2026-08-02                   |
-| P1-07   | Independent leakage gate                  | Done — 2026-08-02                   |
-| P1-08   | Summary provider and Sarvam integration   | Done — 2026-08-03                   |
-| P1-09   | Document-processing orchestrator          | Done — 2026-08-03                   |
-| P1-10   | Connect the Expo application              | Done — 2026-08-03                   |
-| P1-11   | Safety and traceability UI                | Done — 2026-08-03                   |
-| —       | Facility identity (ADR-002 decision)      | Done — 2026-08-04                   |
-| P1-12   | Phase 1 verification and exit review      | Run 2026-08-04 — 2 findings open    |
-| P1-13   | Close the exit-review findings            | Done — 2026-08-19                   |
-| P1-14   | Demonstration mode                        | Done — 2026-08-19                   |
-| Phase 2 | Cloud platform                            | Not started — gated on Phase 1 exit |
+| Step    | Title                                     | State                            |
+| ------- | ----------------------------------------- | -------------------------------- |
+| P1-01   | Architecture contracts                    | Done — 2026-08-02                |
+| P1-02   | Extend domain contracts                   | Done — 2026-08-02                |
+| P1-03   | Backend project skeleton                  | Done — 2026-08-02                |
+| P1-04   | Secure temporary upload handling          | Done — 2026-08-02                |
+| P1-05   | OCR provider abstraction                  | Done — 2026-08-02                |
+| P1-06   | Profile-aware deterministic PII redaction | Done — 2026-08-02                |
+| P1-07   | Independent leakage gate                  | Done — 2026-08-02                |
+| P1-08   | Summary provider and Sarvam integration   | Done — 2026-08-03                |
+| P1-09   | Document-processing orchestrator          | Done — 2026-08-03                |
+| P1-10   | Connect the Expo application              | Done — 2026-08-03                |
+| P1-11   | Safety and traceability UI                | Done — 2026-08-03                |
+| —       | Facility identity (ADR-002 decision)      | Done — 2026-08-04                |
+| P1-12   | Phase 1 verification and exit review      | Run 2026-08-04 — 2 findings open |
+| P1-13   | Close the exit-review findings            | Done — 2026-08-19                |
+| P1-14   | Demonstration mode                        | Done — 2026-08-19                |
+| ADR-003 | Local and cloud parity                    | Accepted — 2026-08-19            |
+| P2-00   | The local stack, and the first two ports  | Done — 2026-08-19                |
+| Phase 2 | Cloud platform                            | Building locally — see ADR-003   |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
 
@@ -1553,3 +1555,107 @@ records".
   — the privacy copy says so — but the demo therefore cannot show the real
   redaction pipeline. Showing that needs the local backend and the `development`
   profile.
+
+---
+
+## ADR-003 and P2-00 — the local stack, and the first two ports
+
+**Done 2026-08-19**
+
+Phase 2 was gated on an AWS account that does not exist. Most of it is not
+really about a cloud provider — the data model, the upload protocol, the
+processing states — so it should not have been waiting.
+[ADR-003](./adr/003-local-cloud-parity.md) records the decision: every cloud
+dependency behind a port, drivers chosen in the backend from
+`AYUNETZ_STACK=local|aws`, and an integration suite written against the ports so
+it becomes the AWS acceptance test on the day there is an account.
+
+[phase-2.md § 10](./phase-2.md) records what that means step by step, and what
+the exit gate must now check on real AWS rather than assume.
+
+### The thing the ADR got wrong, in a useful direction
+
+ADR-003 describes "a local driver and an AWS driver" per port, and lists "code
+that never ships" as a cost. Building it showed that for object storage, records
+and the queue there is only **one** driver. MinIO speaks S3, DynamoDB Local is
+DynamoDB's API, ElasticMQ speaks SQS — so the same AWS SDK client serves both
+stacks, differing only in endpoint and credentials. Identity is the same story:
+a local issuer and a Cognito pool are both JWKS endpoints.
+
+So the local path exercises the code that ships rather than a parallel
+implementation of it, and the predicted cost largely does not exist. OCR remains
+the exception and the only port needing a genuinely separate implementation,
+because Textract has no local equivalent. This is recorded in `config/stack.ts`
+rather than by rewriting the ADR, since the ADR is the decision as taken.
+
+### What changed
+
+`backend/docker-compose.yml` — MinIO, DynamoDB Local and ElasticMQ, health
+checked, on ports 19090–19094. Non-default on purpose: medical records are not
+worth mixing up with whatever else is on `9000`. `npm run stack:up` waits for
+all three to report healthy.
+
+`backend/local/elasticmq.conf` — the processing queue and its dead-letter queue,
+with a 180 s visibility timeout (longer than the orchestrator's own 120 s
+budget, so a slow worker does not have its message handed to a second one) and
+redrive after three attempts.
+
+`backend/src/config/stack.ts` — stack resolution. Defaults to `local`, so a
+checkout with nothing configured cannot reach a real account.
+
+`backend/src/services/objects/ObjectStore.ts` — presigned PUT, and the object
+key layout. Keys are owner-first (`owners/<id>/documents/<id>/pages/001`) so
+erasure is a prefix operation rather than a scan, and carry no name, date of
+birth or device filename, because a bucket listing is metadata and metadata
+about medical records leaks.
+
+`backend/src/services/queue/JobQueue.ts` — enqueue, long-polling receive,
+acknowledge. A job carries identifiers only, enforced at runtime: a queue is
+durable, visible in a console, and often the first thing exported when someone
+debugs a backlog, so ADR-001's logging rule applies to it for the same reasons.
+
+### The finding
+
+A test asserting that a presigned URL refuses a mislabelled upload **failed**.
+The content type was being sent but not signed — SigV4 covers only `host` by
+default — so the URL accepted a body of any type.
+
+Fixed by naming `content-type` in `signableHeaders` rather than by weakening the
+test. It is defence in depth, not the primary control: the pipeline still
+decides format on the file's bytes, because a client that mislabels a PDF is a
+bug and a client that lies about it is an attacker.
+
+Worth noting this was found by running against a container, not by review. It is
+also the first thing to re-check on real AWS, since it is exactly the shape of
+detail an emulator can differ on.
+
+### Tests added
+
+15 in `test/integration/localStack.test.ts` (373 → 388), against the running
+containers: object round-trip, absence reported rather than thrown, deletion,
+owner-prefixed keys, page numbers padded so a listing sorts in reading order,
+presigned upload succeeding without any credential, a mislabelled upload
+refused, a URL repointed at another document refused, expiry present and
+bounded, a job surviving enqueue → receive → acknowledge without redelivery, a
+job carrying OCR text refused, `local` as the default stack, endpoints and
+credentials dropped under `aws`, and no credential in the startup log line.
+
+The suite skips — loudly, printing the command to start the stack — when the
+containers are not running, so a developer without Docker sees "skipped" rather
+than a wall of connection errors.
+
+### Verification
+
+`npm run backend:verify` — 387 passing, 1 skipped, 15 files. Confirmed both
+ways: with the stack up (14 stack tests run) and with a container stopped (they
+skip and the suite stays green). Frontend untouched at 371.
+
+### Limitations
+
+- Repository and identity ports are not built yet. The records container is
+  running and unused.
+- No AWS driver has ever been executed. That is the point of the arrangement,
+  but it means the `aws` path is unproven code until an account exists.
+- The local stack proves wiring, not AWS behaviour. IAM, KMS policies, bucket
+  policies, Cognito's flows, Textract's output and `ap-south-1` residency are
+  untested by construction — the list is in ADR-003 and the § 10 exit criteria.
