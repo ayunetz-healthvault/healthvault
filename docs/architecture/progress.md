@@ -28,6 +28,7 @@ the intent and do not change as work lands. This file is the record.
 | P1-14   | Demonstration mode                        | Done — 2026-08-19                |
 | ADR-003 | Local and cloud parity                    | Accepted — 2026-08-19            |
 | P2-00   | The local stack, and the first two ports  | Done — 2026-08-19                |
+| P2-04a  | Record repository and tenant isolation    | Done — 2026-08-19                |
 | Phase 2 | Cloud platform                            | Building locally — see ADR-003   |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
