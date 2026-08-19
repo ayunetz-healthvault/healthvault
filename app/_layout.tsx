@@ -42,8 +42,8 @@ function AppShell(): React.JSX.Element {
       // Point the API client at SecureStore before any request can fire.
       authService.initialise();
       await restoreSession();
-      // Demo content, so a fresh install has something to show. No-op once the
-      // vault has real records in it.
+      // Fictional records for a demonstration build. Refuses in a live build,
+      // and is a no-op once the vault has records in it.
       seedDemoData();
       if (!cancelled) setBootstrapped(true);
     };

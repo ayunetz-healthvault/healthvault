@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
 
+import { isDemoBuild } from '@/config/env';
 import { MOCK_DOCUMENTS, MOCK_SUMMARIES } from '@/mocks/documents';
 import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
@@ -41,8 +42,16 @@ interface VaultState {
   seeded: boolean;
 
   // --- Seed -----------------------------------------------------------------
-  /** Loads demo data. No-op once the vault has content. */
-  seedDemoData: () => void;
+  /**
+   * Loads the fictional demonstration records.
+   *
+   * Refuses outright in a live build, and is a no-op once the vault has
+   * content. Returns whether it seeded, so a caller can tell "already had
+   * records" from "not a demo build".
+   */
+  seedDemoData: () => boolean;
+  /** Wipes the vault and reloads the demonstration records. Demo builds only. */
+  resetDemoData: () => boolean;
   clearAll: () => void;
 
   // --- Parents --------------------------------------------------------------
@@ -80,7 +89,19 @@ export const useVaultStore = create<VaultState>()(
       seeded: false,
 
       seedDemoData: () => {
-        if (get().seeded || get().parents.length > 0) return;
+        /**
+         * The guard that matters is `isDemoBuild()`.
+         *
+         * Without it this ran on every first launch, so the first real
+         * caregiver to install a live build would open the app and find two
+         * parents they have never met, with medicines and dosages attached.
+         * Fictional records are safe in a demo and are a serious problem
+         * anywhere else — a person could act on a dose that was invented to
+         * fill a screenshot.
+         */
+        if (!isDemoBuild()) return false;
+        if (get().seeded || get().parents.length > 0) return false;
+
         set({
           parents: [...MOCK_PARENTS],
           documents: [...MOCK_DOCUMENTS],
@@ -88,6 +109,22 @@ export const useVaultStore = create<VaultState>()(
           followUps: buildMockFollowUps(),
           seeded: true,
         });
+        return true;
+      },
+
+      resetDemoData: () => {
+        // For the second demo of the day: put the vault back exactly as the
+        // first one found it, including anything the audience added.
+        if (!isDemoBuild()) return false;
+
+        set({
+          parents: [...MOCK_PARENTS],
+          documents: [...MOCK_DOCUMENTS],
+          summaries: [...MOCK_SUMMARIES],
+          followUps: buildMockFollowUps(),
+          seeded: true,
+        });
+        return true;
       },
 
       clearAll: () =>

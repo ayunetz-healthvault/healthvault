@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { Button, Callout, Card, ListRow, Screen, SectionHeader, Text } from '@/components';
-import { config } from '@/config/env';
+import { describeDataResidency } from '@/config/dataResidency';
 import { accountService } from '@/services/account/accountService';
 import { calendarService } from '@/services/calendar/calendarService';
 import { useSessionStore } from '@/state/sessionStore';
@@ -19,6 +19,7 @@ import { formatDateTime } from '@/utils/date';
  */
 export default function PrivacySettingsScreen(): React.JSX.Element {
   const router = useRouter();
+  const residency = describeDataResidency();
   const privacy = useSessionStore((state) => state.privacy);
   const updatePrivacy = useSessionStore((state) => state.updatePrivacy);
 
@@ -112,15 +113,20 @@ export default function PrivacySettingsScreen(): React.JSX.Element {
       </Card>
 
       <SectionHeader title="Where your data lives" />
+      {residency.isPrototype ? (
+        <Callout
+          tone="warning"
+          title="This is a test build"
+          message="The hosted platform is not connected yet. Read the description below before adding a real medical record."
+          testID="privacy-prototype-notice"
+        />
+      ) : null}
       <Card>
         <Text variant="callout" tone="secondary" style={styles.paragraph}>
-          Documents are uploaded straight from this phone to encrypted storage in AWS{' '}
-          {config.aws.region} (Mumbai) and are encrypted at rest with a key we manage in AWS KMS.
-          Records stay in India.
+          {residency.storage}
         </Text>
         <Text variant="callout" tone="secondary" style={styles.paragraph}>
-          Summaries are produced by a service running in the same region. Your documents are never
-          used to train anyone else’s model, and are never sold.
+          {residency.processing}
         </Text>
         <Text variant="caption" tone="muted">
           Disclaimer accepted:{' '}

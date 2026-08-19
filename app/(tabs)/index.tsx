@@ -3,6 +3,7 @@ import { useRouter } from 'expo-router';
 import { StyleSheet, View } from 'react-native';
 
 import {
+  Badge,
   Button,
   Card,
   EmptyState,
@@ -12,6 +13,7 @@ import {
   SectionHeader,
   Text,
 } from '@/components';
+import { isDemoBuild } from '@/config/env';
 import { useSessionStore } from '@/state/sessionStore';
 import {
   selectOverdueFollowUps,
@@ -168,6 +170,20 @@ function Greeting({ firstName }: { firstName: string | null }): React.JSX.Elemen
       <Text variant="title" accessibilityRole="header">
         Your family’s health
       </Text>
+      {/*
+        Present on every launch of a demonstration build, on the first screen,
+        above the fold. Somebody being shown this app is looking at invented
+        medical records, and they should not have to reach the settings screen
+        to find that out.
+      */}
+      {isDemoBuild() ? (
+        <Badge
+          label="Demonstration — these records are fictional"
+          tone="warning"
+          icon="eye-outline"
+          testID="demo-badge"
+        />
+      ) : null}
     </View>
   );
 }

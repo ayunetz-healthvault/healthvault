@@ -407,4 +407,95 @@ describe('seedDemoData', () => {
 
     expect(useVaultStore.getState().parents).toEqual([parent]);
   });
+
+  it('reports whether it actually seeded', () => {
+    useVaultStore.setState({
+      parents: [],
+      documents: [],
+      summaries: [],
+      followUps: [],
+      seeded: false,
+    });
+
+    expect(useVaultStore.getState().seedDemoData()).toBe(true);
+    expect(useVaultStore.getState().seedDemoData()).toBe(false);
+  });
+});
+
+/**
+ * The bug this guards: `seedDemoData` was called on every first launch and
+ * gated only on the vault being empty. A live build's first real caregiver
+ * would therefore open the app to two parents they had never met, carrying
+ * invented medicines and doses. Fictional records are the point of a demo and a
+ * safety problem anywhere else.
+ */
+describe('seeding in a live build', () => {
+  const inLiveBuild = <T>(run: (store: typeof import('./vaultStore')) => T): T => {
+    const original = { ...process.env };
+    let result!: T;
+
+    jest.isolateModules(() => {
+      process.env.EXPO_PUBLIC_ENV = 'prod';
+      process.env.EXPO_PUBLIC_DEMO = 'false';
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      result = run(require('./vaultStore') as typeof import('./vaultStore'));
+    });
+
+    process.env = original;
+    return result;
+  };
+
+  it('refuses to put fictional records in a real caregiver’s vault', () => {
+    inLiveBuild((store) => {
+      store.useVaultStore.setState({
+        parents: [],
+        documents: [],
+        summaries: [],
+        followUps: [],
+        seeded: false,
+      });
+
+      expect(store.useVaultStore.getState().seedDemoData()).toBe(false);
+
+      const state = store.useVaultStore.getState();
+      expect(state.parents).toEqual([]);
+      expect(state.documents).toEqual([]);
+      expect(state.followUps).toEqual([]);
+    });
+  });
+
+  it('refuses to reset a live vault, which would be data loss', () => {
+    inLiveBuild((store) => {
+      store.useVaultStore.setState({
+        parents: [],
+        documents: [],
+        summaries: [],
+        followUps: [],
+        seeded: false,
+      });
+      const parent = store.useVaultStore.getState().addParent(draft({ fullName: 'Real Person' }));
+
+      expect(store.useVaultStore.getState().resetDemoData()).toBe(false);
+      expect(store.useVaultStore.getState().parents).toEqual([parent]);
+    });
+  });
+});
+
+describe('resetDemoData', () => {
+  it('puts the vault back for the next demonstration', () => {
+    useVaultStore.setState({
+      parents: [],
+      documents: [],
+      summaries: [],
+      followUps: [],
+      seeded: false,
+    });
+    useVaultStore.getState().addParent(draft({ fullName: 'Added During The Demo' }));
+
+    expect(useVaultStore.getState().resetDemoData()).toBe(true);
+
+    const names = useVaultStore.getState().parents.map((parent) => parent.fullName);
+    expect(names).not.toContain('Added During The Demo');
+    expect(names.length).toBeGreaterThan(0);
+  });
 });

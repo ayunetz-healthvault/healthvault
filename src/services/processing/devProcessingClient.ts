@@ -92,6 +92,81 @@ const parseErrorBody = (payload: unknown, status: number): DocumentProcessingErr
   return new DocumentProcessingError('unknown', 'The document could not be processed.', { status });
 };
 
+
+/**
+ * A budget for one processing request, composed with the caller's own signal.
+ *
+ * Two things can abort this call and they mean opposite things to the person
+ * holding the phone: they backed out of the screen, or the server went quiet.
+ * The first is not a failure and must not be reported as one; the second is,
+ * and is worth retrying. `expired()` is what tells them apart afterwards, since
+ * an `AbortError` carries no reason of its own.
+ *
+ * `AbortSignal.any` would express this in one line but is not available on
+ * every runtime this app ships to, so the wiring is done by hand.
+ */
+const startDeadline = (
+  timeoutMs: number,
+  caller: AbortSignal | undefined,
+): { signal: AbortSignal; expired: () => boolean; release: () => void } => {
+  const controller = new AbortController();
+  let expired = false;
+
+  const timer = setTimeout(() => {
+    expired = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onCallerAbort = (): void => controller.abort();
+
+  if (caller !== undefined) {
+    if (caller.aborted) {
+      controller.abort();
+    } else {
+      caller.addEventListener('abort', onCallerAbort, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    expired: () => expired,
+    release: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener('abort', onCallerAbort);
+    },
+  };
+};
+
+/**
+ * Why the request ended, in the order that matters to the caregiver.
+ *
+ * A cancel is checked first: if they left the screen we say so, even if the
+ * timer happened to fire in the same tick. Only then is a genuine timeout
+ * reported — retryable, because the pipeline may simply have been slow.
+ */
+const failureFor = (
+  cause: unknown,
+  caller: AbortSignal | undefined,
+  deadline: { expired: () => boolean },
+): DocumentProcessingError => {
+  if (caller?.aborted === true) {
+    return new DocumentProcessingError('processing_timeout', 'Processing was cancelled.', { cause });
+  }
+
+  if (deadline.expired()) {
+    return new DocumentProcessingError(
+      'processing_timeout',
+      'The processing service did not reply in time.',
+      { retryable: true, cause },
+    );
+  }
+
+  return new DocumentProcessingError('upload_failed', 'Could not reach the processing service.', {
+    retryable: true,
+    cause,
+  });
+};
+
 export const processDocumentOnBackend = async (
   input: ProcessOnBackendInput,
 ): Promise<ProcessDocumentResponse> => {
@@ -114,42 +189,53 @@ export const processDocumentOnBackend = async (
    */
   onUploadProgress?.(5);
 
-  let response: Response;
+  const deadline = startDeadline(config.api.processingTimeoutMs, signal);
 
   try {
-    response = await fetchImpl(url, {
-      method: 'POST',
-      body: buildFormData(document, parent),
-      // Content-Type is deliberately unset: the runtime fills in the multipart
-      // boundary, and setting it by hand produces a body the server cannot parse.
-      headers: { Accept: 'application/json' },
-      ...(signal === undefined ? {} : { signal }),
-    });
-  } catch (cause) {
-    if (signal?.aborted === true) {
-      throw new DocumentProcessingError('processing_timeout', 'Processing was cancelled.', {
-        cause,
+    let response: Response;
+
+    try {
+      response = await fetchImpl(url, {
+        method: 'POST',
+        body: buildFormData(document, parent),
+        // Content-Type is deliberately unset: the runtime fills in the multipart
+        // boundary, and setting it by hand produces a body the server cannot parse.
+        headers: { Accept: 'application/json' },
+        signal: deadline.signal,
       });
+    } catch (cause) {
+      throw failureFor(cause, signal, deadline);
     }
-    throw new DocumentProcessingError('upload_failed', 'Could not reach the processing service.', {
-      retryable: true,
-      cause,
-    });
+
+    onUploadProgress?.(100);
+
+    // The body is read while the deadline is still live: a server that sends
+    // headers and then stops would otherwise hang here instead of in `fetch`,
+    // which is the same stranded screen by a different route.
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (cause) {
+      if (signal?.aborted === true || deadline.expired()) {
+        throw failureFor(cause, signal, deadline);
+      }
+      payload = null;
+    }
+
+    if (!response.ok) {
+      throw parseErrorBody(payload, response.status);
+    }
+
+    if (payload === null || typeof payload !== 'object') {
+      throw new DocumentProcessingError(
+        'validation_failed',
+        'The processing reply was unreadable.',
+        { status: response.status },
+      );
+    }
+
+    return payload as ProcessDocumentResponse;
+  } finally {
+    deadline.release();
   }
-
-  onUploadProgress?.(100);
-
-  const payload: unknown = await response.json().catch(() => null);
-
-  if (!response.ok) {
-    throw parseErrorBody(payload, response.status);
-  }
-
-  if (payload === null || typeof payload !== 'object') {
-    throw new DocumentProcessingError('validation_failed', 'The processing reply was unreadable.', {
-      status: response.status,
-    });
-  }
-
-  return payload as ProcessDocumentResponse;
 };

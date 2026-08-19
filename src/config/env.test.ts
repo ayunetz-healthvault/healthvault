@@ -34,7 +34,7 @@ describe('isBackendEnabled', () => {
   it('stays off while mocks are on, whatever the URL says', () => {
     expect(
       backendEnabled({
-        EXPO_PUBLIC_USE_MOCKS: 'true',
+        EXPO_PUBLIC_DEMO: 'true',
         EXPO_PUBLIC_API_BASE_URL: 'https://api.example.com',
       }),
     ).toBe(false);
@@ -43,7 +43,7 @@ describe('isBackendEnabled', () => {
   it('accepts https anywhere', () => {
     expect(
       backendEnabled({
-        EXPO_PUBLIC_USE_MOCKS: 'false',
+        EXPO_PUBLIC_DEMO: 'false',
         EXPO_PUBLIC_API_BASE_URL: 'https://curly-fiesta.github.dev',
       }),
     ).toBe(true);
@@ -52,7 +52,7 @@ describe('isBackendEnabled', () => {
   describe('the http exception for local development', () => {
     const local = (url: string): boolean =>
       backendEnabled({
-        EXPO_PUBLIC_USE_MOCKS: 'false',
+        EXPO_PUBLIC_DEMO: 'false',
         EXPO_PUBLIC_ENV: 'local',
         EXPO_PUBLIC_API_BASE_URL: url,
       });
@@ -83,7 +83,7 @@ describe('isBackendEnabled', () => {
       (environment) => {
         expect(
           backendEnabled({
-            EXPO_PUBLIC_USE_MOCKS: 'false',
+            EXPO_PUBLIC_DEMO: 'false',
             EXPO_PUBLIC_ENV: environment,
             EXPO_PUBLIC_API_BASE_URL: 'http://localhost:4000',
           }),
@@ -94,5 +94,52 @@ describe('isBackendEnabled', () => {
     it('refuses a URL with no scheme at all', () => {
       expect(local('localhost:4000')).toBe(false);
     });
+  });
+});
+
+/**
+ * Demo builds show fictional records to people deciding whether to trust this
+ * app with their family's medical history. Two properties have to hold, and
+ * neither can be left to a reviewer noticing: a shipped build is never a demo
+ * by accident, and a demo build can never reach a server.
+ */
+describe('isDemoBuild', () => {
+  const demoIn = (env: Record<string, string | undefined>): boolean =>
+    withEnv(env, (module) => module.isDemoBuild());
+
+  it('is on for a fresh clone, so the app is demoable with no setup', () => {
+    expect(demoIn({})).toBe(true);
+  });
+
+  it('is on for the demo build profile', () => {
+    expect(demoIn({ EXPO_PUBLIC_ENV: 'demo' })).toBe(true);
+  });
+
+  it.each(['dev', 'staging', 'prod'])('is off for a %s build unless asked for', (environment) => {
+    expect(demoIn({ EXPO_PUBLIC_ENV: environment })).toBe(false);
+  });
+
+  it('can be turned off in a local checkout', () => {
+    expect(demoIn({ EXPO_PUBLIC_ENV: 'local', EXPO_PUBLIC_DEMO: 'false' })).toBe(false);
+  });
+
+  it('never reaches a backend, whatever the API URL says', () => {
+    expect(
+      backendEnabled({
+        EXPO_PUBLIC_DEMO: 'true',
+        EXPO_PUBLIC_ENV: 'prod',
+        EXPO_PUBLIC_API_BASE_URL: 'https://api.ayunetz.in',
+      }),
+    ).toBe(false);
+  });
+
+  it('does not reach a local backend either, so a demo cannot upload a real document', () => {
+    expect(
+      backendEnabled({
+        EXPO_PUBLIC_DEMO: 'true',
+        EXPO_PUBLIC_ENV: 'local',
+        EXPO_PUBLIC_API_BASE_URL: 'http://localhost:4000',
+      }),
+    ).toBe(false);
   });
 });

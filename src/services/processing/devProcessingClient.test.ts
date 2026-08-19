@@ -1,6 +1,7 @@
 import { contentTypeFor, processDocumentOnBackend } from './devProcessingClient';
 import { DocumentProcessingError } from './types';
 
+import { config } from '@/config/env';
 import { MOCK_DOCUMENTS } from '@/mocks/documents';
 import { MOCK_PARENTS } from '@/mocks/parents';
 import type { DocumentPage, MedicalDocument, ParentProfile } from '@/types/domain';
@@ -160,7 +161,7 @@ describe('processDocumentOnBackend', () => {
 
       await expect(
         processDocumentOnBackend({ document, parent, fetchImpl, signal: controller.signal }),
-      ).rejects.toMatchObject({ code: 'processing_timeout' });
+      ).rejects.toMatchObject({ code: 'processing_timeout', retryable: false });
     });
 
     it('rejects a reply that is not an object', async () => {
@@ -184,6 +185,143 @@ describe('processDocumentOnBackend', () => {
         },
       );
     });
+  });
+});
+
+/**
+ * The screen used to wait forever.
+ *
+ * `EXPO_PUBLIC_API_TIMEOUT_MS` was read into config and applied to ordinary
+ * CRUD calls, but this client builds its own `fetch` and passed no signal at
+ * all — so a backend that accepted the upload and then went quiet left the
+ * processing screen spinning with no way out but force-quitting the app.
+ */
+describe('the request deadline', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  /** Resolves with the failure, and fails the test if the call somehow succeeds. */
+  const failureFrom = (promise: Promise<unknown>): Promise<DocumentProcessingError> =>
+    promise.then(
+      () => {
+        throw new Error('expected the request to fail');
+      },
+      (error: unknown) => error as DocumentProcessingError,
+    );
+
+  /** A server that accepts the connection and then never answers. */
+  const silentServer = (): typeof fetch =>
+    jest.fn(
+      (_url: unknown, init: unknown) =>
+        new Promise<Response>((_resolve, reject) => {
+          const { signal } = init as { signal: AbortSignal };
+          signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+        }),
+    ) as unknown as typeof fetch;
+
+  it('always gives fetch a signal, even when the caller supplies none', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse(successBody)) as unknown as typeof fetch;
+
+    await processDocumentOnBackend({ document, parent, fetchImpl });
+
+    const init = (fetchImpl as jest.Mock).mock.calls[0]?.[1] as { signal?: AbortSignal };
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('gives up on a server that never replies, rather than waiting forever', async () => {
+    const fetchImpl = silentServer();
+    const settled = failureFrom(processDocumentOnBackend({ document, parent, fetchImpl }));
+
+    await jest.advanceTimersByTimeAsync(config.api.processingTimeoutMs);
+
+    await expect(settled).resolves.toMatchObject({
+      code: 'processing_timeout',
+      retryable: true,
+    });
+  });
+
+  it('says the service did not reply, which is not the same as being cancelled', async () => {
+    const fetchImpl = silentServer();
+    const settled = failureFrom(processDocumentOnBackend({ document, parent, fetchImpl }));
+
+    await jest.advanceTimersByTimeAsync(config.api.processingTimeoutMs);
+
+    const error = await settled;
+    expect(error.message).not.toMatch(/cancelled/i);
+    expect(error.message).toMatch(/did not reply/i);
+  });
+
+  it('waits longer than the backend allows itself, so slow is not mistaken for dead', () => {
+    // The orchestrator budgets 120 s, inside which the summary provider may take
+    // three attempts of 60 s. A client deadline below that would fail documents
+    // that were still being processed correctly.
+    expect(config.api.processingTimeoutMs).toBeGreaterThan(120_000);
+  });
+
+  it('a caregiver leaving the screen still reads as a cancellation, not a timeout', async () => {
+    const controller = new AbortController();
+    const fetchImpl = silentServer();
+    const settled = failureFrom(
+      processDocumentOnBackend({ document, parent, fetchImpl, signal: controller.signal }),
+    );
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+
+    const error = await settled;
+    expect(error.code).toBe('processing_timeout');
+    expect(error.retryable).toBe(false);
+    expect(error.message).toMatch(/cancelled/i);
+  });
+
+  it('clears its timer once the request is done', async () => {
+    const fetchImpl = jest.fn(async () => jsonResponse(successBody)) as unknown as typeof fetch;
+
+    await processDocumentOnBackend({ document, parent, fetchImpl });
+
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('clears its timer when the request fails too', async () => {
+    const fetchImpl = jest.fn(async () => {
+      throw new TypeError('Network request failed');
+    }) as unknown as typeof fetch;
+
+    await expect(processDocumentOnBackend({ document, parent, fetchImpl })).rejects.toBeInstanceOf(
+      DocumentProcessingError,
+    );
+
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('times out a server that sends headers and then stalls on the body', async () => {
+    // Headers arrive, so `fetch` resolves and the old code was past every guard
+    // it had. A real `Response` body rejects when the request signal aborts, and
+    // this mock does the same — otherwise the screen hangs here instead.
+    const fetchImpl = jest.fn(async (_url: unknown, init: unknown) => {
+      const { signal } = init as { signal: AbortSignal };
+      return {
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('Aborted')), { once: true });
+          }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch;
+
+    const settled = failureFrom(processDocumentOnBackend({ document, parent, fetchImpl }));
+
+    await jest.advanceTimersByTimeAsync(config.api.processingTimeoutMs);
+
+    const error = await settled;
+    expect(error.code).toBe('processing_timeout');
+    expect(error.retryable).toBe(true);
   });
 });
 

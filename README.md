@@ -445,12 +445,33 @@ Before the first build you will need to:
 npx eas-cli submit --profile production --platform android
 ```
 
-Do not ship to a public store yet. `production` sets
-`EXPO_PUBLIC_USE_MOCKS=false`, which points the app at a backend that does not
-exist — auth, upload and summaries will all fail. It also has the open
-`TODO(security)` items below, and both stores require a privacy policy and a
-health-data declaration that have not been written. Use the `preview` profile
-for internal distribution until the AWS stack is real.
+Do not ship to a public store yet. `production` sets `EXPO_PUBLIC_DEMO=false`,
+which points the app at a backend that does not exist — auth, upload and
+summaries will all fail. It also has the open `TODO(security)` items below, and
+both stores require a privacy policy and a health-data declaration that have not
+been written.
+
+### Build profiles
+
+| Profile       | `EXPO_PUBLIC_DEMO` | What it is                                                 |
+| ------------- | ------------------ | ---------------------------------------------------------- |
+| `development` | `true`             | Local development against fictional records                |
+| `demo`        | `true`             | The build you hand to an investor, a hospital, or a family |
+| `preview`     | `false`            | Internal distribution against a real backend               |
+| `production`  | `false`            | Store release. Not viable until the AWS stack exists       |
+
+```bash
+npx eas-cli build --profile demo --platform android
+```
+
+**Demo builds are chosen at build time and cannot be turned on afterwards.** A
+`production` bundle has `EXPO_PUBLIC_DEMO=false` compiled into it, so no
+setting, deep link or support call can make it show fictional records. The
+reverse also holds and matters more: a demo build refuses to contact any backend
+whatever `EXPO_PUBLIC_API_BASE_URL` says, so when somebody photographs a real
+prescription during a demonstration — and they will — the pages cannot leave the
+device. The app says all of this on screen rather than in a footnote: a badge on
+the first screen, and the storage description on the privacy screen.
 
 ## Known gaps before this handles real patient data
 

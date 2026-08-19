@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { Button, Callout, Card, Screen, Text } from '@/components';
+import { describeDataResidency } from '@/config/dataResidency';
 import { useSessionStore } from '@/state/sessionStore';
 import { colors, radius, spacing, touchTarget } from '@/theme';
 
@@ -38,7 +39,7 @@ const POINTS: { icon: keyof typeof Ionicons.glyphMap; title: string; body: strin
   {
     icon: 'lock-closed-outline',
     title: 'Your family’s records stay private',
-    body: 'Documents are encrypted and stored in the Mumbai (ap-south-1) region. They are never sold, and never shared without your explicit action.',
+    body: describeDataResidency().disclaimerBody,
   },
 ];
 

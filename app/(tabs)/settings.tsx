@@ -3,7 +3,8 @@ import { useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { Avatar, Card, ConfirmDialog, ListRow, Screen, SectionHeader, Text } from '@/components';
-import { config } from '@/config/env';
+import { describeDataResidency } from '@/config/dataResidency';
+import { config, isDemoBuild } from '@/config/env';
 import { useSessionStore } from '@/state/sessionStore';
 import { useVaultStore } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
@@ -18,6 +19,7 @@ const LOCK_LABELS = {
 export default function SettingsScreen(): React.JSX.Element {
   const router = useRouter();
   const [signOutVisible, setSignOutVisible] = useState(false);
+  const [resetVisible, setResetVisible] = useState(false);
 
   const user = useSessionStore((state) => state.user);
   const privacy = useSessionStore((state) => state.privacy);
@@ -25,6 +27,12 @@ export default function SettingsScreen(): React.JSX.Element {
 
   const parentCount = useVaultStore((state) => state.parents.length);
   const documentCount = useVaultStore((state) => state.documents.length);
+  const resetDemoData = useVaultStore((state) => state.resetDemoData);
+
+  const handleResetDemo = (): void => {
+    setResetVisible(false);
+    resetDemoData();
+  };
 
   const handleSignOut = async (): Promise<void> => {
     setSignOutVisible(false);
@@ -96,6 +104,21 @@ export default function SettingsScreen(): React.JSX.Element {
         />
       </Card>
 
+      {isDemoBuild() ? (
+        <>
+          <SectionHeader title="Demonstration" />
+          <Card padded={false} style={styles.group}>
+            <ListRow
+              title="Start a fresh demonstration"
+              subtitle="Puts the fictional records back the way they started"
+              icon="refresh-outline"
+              onPress={() => setResetVisible(true)}
+              testID="settings-reset-demo"
+            />
+          </Card>
+        </>
+      ) : null}
+
       <SectionHeader title="About" />
       <Card padded={false} style={styles.group}>
         <ListRow
@@ -108,14 +131,14 @@ export default function SettingsScreen(): React.JSX.Element {
         <View style={styles.divider} />
         <ListRow
           title="Version"
-          subtitle={`0.1.0 · ${config.environment}${config.useMocks ? ' · demo data' : ''}`}
+          subtitle={`0.1.0 · ${config.environment}${config.demo ? ' · demonstration build' : ''}`}
           icon="cube-outline"
           testID="settings-version"
         />
         <View style={styles.divider} />
         <ListRow
           title="Where your data is stored"
-          subtitle={`AWS ${config.aws.region} (Mumbai)`}
+          subtitle={describeDataResidency().shortLabel}
           icon="server-outline"
           testID="settings-region"
         />
@@ -131,6 +154,16 @@ export default function SettingsScreen(): React.JSX.Element {
           testID="settings-sign-out"
         />
       </Card>
+
+      <ConfirmDialog
+        visible={resetVisible}
+        title="Start a fresh demonstration?"
+        message="Anything added during the last demonstration is removed and the fictional records go back to how they started. Nothing real is affected — this build has no server and holds no real records."
+        confirmLabel="Reset"
+        onConfirm={handleResetDemo}
+        onCancel={() => setResetVisible(false)}
+        testID="reset-demo-dialog"
+      />
 
       <ConfirmDialog
         visible={signOutVisible}

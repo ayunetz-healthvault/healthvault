@@ -24,6 +24,8 @@ the intent and do not change as work lands. This file is the record.
 | P1-11   | Safety and traceability UI                | Done — 2026-08-03                   |
 | —       | Facility identity (ADR-002 decision)      | Done — 2026-08-04                   |
 | P1-12   | Phase 1 verification and exit review      | Run 2026-08-04 — 2 findings open    |
+| P1-13   | Close the exit-review findings            | Done — 2026-08-19                   |
+| P1-14   | Demonstration mode                        | Done — 2026-08-19                   |
 | Phase 2 | Cloud platform                            | Not started — gated on Phase 1 exit |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
@@ -1349,3 +1351,205 @@ Two things should happen before it is demonstrated outside the team: correct the
 storage claim on the disclaimer screen, and put a timeout on the processing
 request. Neither is large. The Phase 2 gate should also record the real-document
 question above rather than inherit a criterion that was not met.
+
+---
+
+## P1-13 — Closing the two exit-review findings
+
+**Done 2026-08-19**
+
+P1-12 left two things that had to be fixed before this build could be shown to
+anyone outside the team. Both are now closed.
+
+### Finding 2 — the storage claim
+
+The disclaimer told users their documents were "encrypted and stored in the
+Mumbai (ap-south-1) region" in a build with no cloud storage. Reviewing it
+turned up **two more places making the same claim** that P1-12 had not caught:
+the privacy settings screen and the settings tab's storage row.
+
+Rather than rewrite three strings — which is how they drifted apart in the first
+place — the description now comes from one module,
+[`src/config/dataResidency.ts`](../../src/config/dataResidency.ts), which
+classifies the running build into a tier and returns copy for it:
+
+| Tier            | When                                   | What it says                                                 |
+| --------------- | -------------------------------------- | ------------------------------------------------------------ |
+| `on-device`     | no backend reachable                   | documents stay on the phone, nothing is uploaded             |
+| `local-backend` | a development server on a private host | pages go to a dev server and are deleted after being read    |
+| `cloud`         | an `https://` platform URL             | the region, KMS and residency claim — the only tier that may |
+
+Non-cloud tiers also set `isPrototype`, which puts a "This is a test build"
+callout above the description on the privacy screen. § 8 of phase-1.md requires
+operational limitations to stay visible in demos, not only in documentation;
+this is that requirement implemented rather than remembered.
+
+The rule is now testable, and tested: `dataResidency.test.ts` asserts that no
+non-cloud tier can mention `ap-south-1`, `Mumbai`, `AWS`, `KMS`, or the phrase
+"encrypted stored", and that the cloud tier follows `EXPO_PUBLIC_AWS_REGION`
+rather than hard-coding a region. A future edit that reintroduces the claim
+fails the suite instead of shipping.
+
+### Finding 3 — the processing request had no timeout
+
+`EXPO_PUBLIC_API_TIMEOUT_MS` was applied by `apiRequest` all along; the gap was
+that `devProcessingClient` builds its own multipart `fetch` and passed **no
+signal at all**. A backend that accepted the upload and went quiet left the
+processing screen spinning with no exit but force-quitting the app.
+
+**Applying the existing 20 s timeout would have been the wrong fix.** The
+orchestrator budgets itself 120 s, inside which the summary provider may spend
+three attempts of 60 s, so a CRUD-sized deadline would have failed documents
+that were still being processed correctly — trading a hang for a false failure.
+So processing got its own budget: `EXPO_PUBLIC_PROCESSING_TIMEOUT_MS`, default
+180 s, with a test asserting it stays above the backend's own 120 s.
+
+The deadline composes with the caller's signal by hand rather than through
+`AbortSignal.any`, which is not available on every runtime this app ships to.
+Which of the two fired is tracked, because they mean opposite things to the
+person holding the phone:
+
+- **they left the screen** — `processing_timeout`, "Processing was cancelled",
+  not retryable. Not a failure.
+- **the server went quiet** — `processing_timeout`, "The processing service did
+  not reply in time", retryable.
+
+The body is read while the deadline is still live. A server that sends headers
+and then stalls would otherwise hang on `response.json()` — the same stranded
+screen one step further along, and exactly the kind of gap the original fix
+would have left open.
+
+### Tests added
+
+22 new tests (331 → 353, 24 → 25 suites). `dataResidency.test.ts` covers tier
+resolution and the claims each tier is permitted to make. The deadline suite
+covers: a signal always reaching `fetch`; a silent server failing rather than
+hanging; the wording distinguishing a timeout from a cancel; the client budget
+exceeding the backend's; a cancel during a live request still reading as a
+cancel; the timer being cleared on both success and failure; and a stalled body
+timing out.
+
+### Verification
+
+`npm run verify` — typecheck, lint, 353 tests across 25 suites, all passing.
+Backend unchanged: 373 tests across 14 files.
+
+Confirmed by driving the running app, since that is what caught finding 1: the
+disclaimer reads "Documents stay on this phone and are not uploaded anywhere",
+the settings row reads "This device only", and the privacy screen shows the
+test-build callout above the on-device description.
+
+### Also fixed
+
+`.claude/launch.json` pinned the Expo web server to port 19006. Port 8081 is
+taken by Docker on this machine, and `expo start` then asks an interactive
+question that a non-interactive launch cannot answer, so the preview failed to
+start at all.
+
+### Noted, not changed
+
+`read_page` returns an empty accessibility tree for the running web app while
+the screen renders normally, which is likely the same root cause as P1-12's note
+that document rows are not exposed to assistive technology. `DocumentCard`
+passes a label and hint through `Card`, which sets `accessibilityRole="button"`,
+so the components look correct and the problem is more likely in how
+react-native-web projects them. Worth a proper accessibility pass before real
+users; not a Phase 1 exit criterion.
+
+### Still open from P1-12
+
+The exit criterion "no real patient data has been used" remains not met, for the
+reasons recorded there. It is inherited by the Phase 2 gate rather than closed
+here.
+
+---
+
+## P1-14 — Demonstration mode
+
+**Done 2026-08-19**
+
+Phase 2 planning raised whether the app still needed its mock layer once a local
+stack existed. The answer turned out to be yes, but not as mocks: there is a
+real need to show this app to an investor, a hospital or a family with no
+Docker, no network and no backend. That is a product feature and now looks like
+one.
+
+### The bug this found
+
+`seedDemoData()` ran on **every** first launch, gated only on the vault being
+empty — not on the build being a demonstration. The first real caregiver to
+install a live build would have opened the app to two parents they had never
+met, carrying invented medicines and doses.
+
+Fictional records are the entire point of a demo and a safety problem anywhere
+else: a person can act on a dose that was written to fill a screenshot. The
+seed now refuses outright in a live build, and two tests hold that line.
+
+### What changed
+
+`EXPO_PUBLIC_USE_MOCKS` became `EXPO_PUBLIC_DEMO`, which is not a rename. The
+old flag meant "use fake services"; the new one names a build flavour with three
+properties that make it safe to hand to a stranger:
+
+1. **Chosen at build time.** A production bundle has `EXPO_PUBLIC_DEMO=false`
+   compiled in and cannot be talked into demo mode by a setting, a deep link or
+   a support call. The default follows the environment — a local checkout is a
+   demo unless it opts out, everything else is live unless it opts in — so a
+   fresh clone stays demoable with no setup and no release becomes a demo by
+   accident.
+2. **No demo build can reach a server.** `isBackendEnabled` returns false
+   unconditionally for a demo build. Somebody will photograph a real
+   prescription during a demonstration; this is what makes that safe, rather
+   than trusting that the API URL was left blank.
+3. **The app says so.** A badge on the dashboard above the fold, a `demo` tier
+   in `dataResidency` stating the records are fictional, and
+   `0.1.0 · local · demonstration build` on the version row.
+
+Also added: a **Start a fresh demonstration** action in settings, which puts the
+fictional records back for the next audience and refuses to run in a live build,
+where it would be data loss.
+
+`eas.json` gained a `demo` profile (internal APK, blank API URL) and `preview`
+was corrected — it had `EXPO_PUBLIC_USE_MOCKS=true`, so every internal preview
+build was a demo in everything but name.
+
+### Decisions worth recording
+
+**Three runtime modes were kept, deliberately.** The Phase 2 discussion argued
+for collapsing to local and cloud, because a third implementation of the same
+contract is where behaviour drifts. Demo mode survives that argument only
+because it is now build-gated, visibly labelled, and cannot reach a backend —
+and because the alternative is having nothing to show a hospital. It is a
+product surface, not a test double, and should not be used as one.
+
+**The demo tier does not promise records are "never sold".** Every other tier
+does. The promise is vacuous when the records are invented, and a test asserts
+the distinction rather than leaving it to whoever edits the copy next.
+
+### Tests added
+
+18 new tests (353 → 371). `isDemoBuild` across every environment; a demo build
+refusing both a cloud and a local backend URL; the seed refusing to populate a
+live vault and the reset refusing to wipe one; and the demo tier's copy stating
+that records are fictional and that anything the audience adds stays on the
+device.
+
+### Verification
+
+`npm run verify` — typecheck, lint, 371 tests across 25 suites, all passing.
+
+Confirmed in the running app: the badge reads "Demonstration — these records are
+fictional" above the fold on the dashboard, settings shows the Demonstration
+section with the reset action, the version row reads "0.1.0 · local ·
+demonstration build", and the storage row reads "Demonstration build — fictional
+records".
+
+### Limitations
+
+- The live-build seeding refusal is covered by test, not by a browser walk. It
+  needs a second dev server on a different environment, which is worth doing
+  once the local stack lands.
+- Demo capture still produces an illustrative summary on-device. That is honest
+  — the privacy copy says so — but the demo therefore cannot show the real
+  redaction pipeline. Showing that needs the local backend and the `development`
+  profile.

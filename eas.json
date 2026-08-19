@@ -10,7 +10,19 @@
       "channel": "development",
       "env": {
         "EXPO_PUBLIC_ENV": "local",
-        "EXPO_PUBLIC_USE_MOCKS": "true"
+        "EXPO_PUBLIC_DEMO": "true"
+      }
+    },
+    "demo": {
+      "distribution": "internal",
+      "channel": "demo",
+      "android": {
+        "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_ENV": "demo",
+        "EXPO_PUBLIC_DEMO": "true",
+        "EXPO_PUBLIC_API_BASE_URL": ""
       }
     },
     "preview": {
@@ -21,7 +33,7 @@
       },
       "env": {
         "EXPO_PUBLIC_ENV": "dev",
-        "EXPO_PUBLIC_USE_MOCKS": "true"
+        "EXPO_PUBLIC_DEMO": "false"
       }
     },
     "production": {
@@ -31,7 +43,7 @@
       },
       "env": {
         "EXPO_PUBLIC_ENV": "prod",
-        "EXPO_PUBLIC_USE_MOCKS": "false"
+        "EXPO_PUBLIC_DEMO": "false"
       }
     }
   },
