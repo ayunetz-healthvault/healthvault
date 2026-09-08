@@ -16,15 +16,15 @@ never hidden by closing the parent story.
 | KOO-02 | Implemented locally | Cognito wired and tested against a faked provider; **live pool unverified** |
 | KOO-03 | Implemented locally | Model, policy, routes, invitations, migration; **DynamoDB semantics unrun here** |
 | KOO-04 | Implemented locally | Encrypted per-account vault, protected originals; **device checks open** |
-| KOO-05 | Implemented locally | Outbox, classification, pull with tombstones, honest status line |
+| KOO-05 | Implemented locally | Outbox, classification, pull with tombstones, honest status line; follow-ups now pull as well as push |
 | KOO-06 | Implemented locally | Real create/presign/PUT/complete with resume; **local-stack protocol test unrun** |
-| KOO-07 | Implemented locally | Worker, leases, idempotency, DLQ, double grant/consent check |
-| KOO-08 | Partly implemented | Backend review/corrections/versioning done; **native review screen not rebuilt** |
+| KOO-07 | Implemented locally | Worker, leases, idempotency, DLQ, double grant/consent check; a withdrawal mid-run now ends in a state a screen can show |
+| KOO-08 | Implemented locally | Backend review/corrections/versioning plus the native review screen |
 | KOO-09 | Partly implemented | Family overview reads real roles and pulled records; attention rules tested |
-| KOO-10 | Partly implemented | Schedule/dose model and safety rules done; **Today screen not yet wired to it** |
-| KOO-11 | Partly implemented | Observation model and visit assembly done; **entry screens not built** |
-| KOO-12 | Partly implemented | Per-device calendar mappings and content minimisation done; **follow-up CRUD not moved to `/v1`** |
-| KOO-13 | Partly implemented | Consent model enforced in the worker; DATA_HANDLING.md; **export/deletion endpoints not built** |
+| KOO-10 | Implemented locally | Schedules confirmed by a person, doses from `occurrences.ts`, Today wired to both |
+| KOO-11 | Implemented locally | Observation entry and visit preparation built on the tested model; **no `/v1` endpoint yet, so they stay on one phone** |
+| KOO-12 | Implemented locally | Follow-up CRUD over `/v1`, one identity end to end, shared both ways; per-device calendar confirmation kept |
+| KOO-13 | Implemented locally | Consent stored, versioned and enforced; per-record export saved to a file; erasure fenced and resumable |
 | KOO-14 | Blocked | Startup safety guard implemented and tested; **every cloud step needs an account this session has none of** |
 | KOO-15 | Partly satisfied | Both gates run and recorded below; **no device, no cloud, no live provider journey** |
 
@@ -359,6 +359,8 @@ while locked. Expo Go is not evidence for any of these.
 | Durable encrypted outbox, mutation ids, versions, bounded retries, backoff; a timeout after commit does not duplicate | Satisfied | The id is generated once and reused on every retry — asserted directly |
 | Saved locally / syncing / synced / failed / conflict distinguished; last sync shown | Satisfied | `SyncStatus`, 8 tests; the time only advances when something was acknowledged |
 | Tombstones so deletions are not resurrected | Satisfied | A record the server no longer returns is removed; `removedPatientIds` |
+| Shared records come *down*, not only up | Satisfied | Follow-ups are pulled with each record's documents; `mergeFollowUps` keeps an unsent change and drops one deleted elsewhere; 14 tests across `mergeFollowUps` and `pullService` |
+| One identity for a record created offline | Satisfied | The device's id travels with the create and the server takes it; a retry after a lost response returns the same task rather than a second one |
 | Stale writes rejected after revocation; inaccessible records cleared | Satisfied | 401/403/404 → `rejected`, never retried, never silently dropped |
 | Conflicts surfaced, not overwritten by a device clock | Satisfied | 409 → `conflict`, stops, needs a person |
 | Explicit retry controls; demo storage separate from live | Satisfied | `retryNow` keeps the attempt history so a hopeless change cannot be retried forever one tap at a time |
@@ -408,8 +410,9 @@ demonstrates the app with and then believes.
 | Unclear values stay unknown with visible warnings | Partly | Uncertainties are carried into visit preparation; **the review screen is not rebuilt** |
 | Follow-ups stay proposals; creating a task needs separate confirmation | Partly | Model enforces it; **the confirm-to-create UI is not built** |
 
-**Not done:** the native review screen. The API is complete and tested; the
-screen that puts the original beside the draft is the next slice.
+**Built in round two:** the native review screen, with the original pages beside
+what the app read, corrections that name the version they were made against, and
+a confirmation step before an AI proposal becomes a schedule or a task.
 
 ## KOO-09 to KOO-12 — the two journeys
 
@@ -433,9 +436,12 @@ rules, as pure tested functions.
   carry the record. Three existing tests asserted the old behaviour and were
   replaced with the reason recorded beside them.
 
-**Not done:** the screens that use them. The parent's Today screen still renders
-the no-treatment state rather than reading `occurrences.ts`; observation entry,
-visit preparation and follow-up CRUD over `/v1` are not built.
+**Built in rounds two and three:** the screens that use them. Today reads
+`occurrences.ts`; observation entry and visit preparation are built; follow-up
+CRUD went to `/v1` and, in round three, gained one identity end to end and a pull
+path, so a task created on one phone reaches the other. Observations, treatments
+and dose events still have no endpoint and stay on the device that recorded
+them.
 
 ## KOO-13 — Privacy choices, export and deletion
 
@@ -447,9 +453,11 @@ missing answer is not permission. `DATA_HANDLING.md` records retention, the
 difference between leaving a family and deleting a record, and what deletion
 cannot reach.
 
-**Not done:** the export and deletion endpoints, and the consent store itself —
-`consentFor` is wired explicitly and returns nothing, which means not permitted,
-which is the safe direction to be incomplete in.
+**Built since:** the consent store and its endpoints (round two), the per-record
+export and deletion (round two), and in round three the parts of both that were
+still promises — an export that writes a file for the person to keep, and an
+erasure that fences writes, follows every query page and can be finished after an
+interruption.
 
 ## KOO-14 — Controlled cloud environment and operational recovery
 
@@ -470,24 +478,34 @@ does not have. None is marked complete.
 
 ### Gates actually run, at the end of this work
 
-Commit `a999da8`, 2026-09-08.
+Commit `9c0aa01`, 2026-09-08, at the end of review round three. The round-two
+numbers (`a999da8`: 844 app tests, 590 backend) are kept in the round-two
+section below so the two rounds can be compared.
 
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit` (app) | **pass**, exit 0 |
 | `npx eslint .` (app) | **pass**, exit 0 |
-| `npx jest` (app) | **pass** — **844 tests / 55 suites** (371 at baseline) |
+| `npx jest` (app) | **pass** — **885 tests / 58 suites** (371 at baseline) |
 | `npx tsc --noEmit` (backend) | **pass**, exit 0 |
 | `npx eslint .` (backend) | **pass**, exit 0 |
-| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **590 passed, 92 skipped** (410 / 79 at baseline) |
-| `npx vitest run` (backend, no skip) | **fail** — 6 `tesseractOcr` tests, unchanged from baseline and environmental |
+| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **628 passed, 92 skipped** (410 / 79 at baseline) |
+| `npx vitest run` (backend, no skip) | **fail** — the same 6 `tesseractOcr` tests, unchanged from baseline and environmental |
 
 ### The two blocked gates, with their actual errors
 
 Both were re-checked at the end of this work. Neither has moved, and neither is
 a defect in this branch.
 
-**The local stack cannot start.** `docker compose pull` fails fetching image
+**The local stack cannot start.** In this session there is no Docker daemon at
+all — `docker compose pull` answers:
+
+```
+unable to get image 'amazon/dynamodb-local:2.5.2': failed to connect to the
+docker API at unix:///var/run/docker.sock: no such file or directory
+```
+
+In the previous session the daemon ran and the registry refused the image
 layers:
 
 ```
@@ -495,9 +513,10 @@ failed to copy: httpReadSeeker: failed open: failed to do request:
 Get "https://production.cloudfront.docker.com/registry-v2/.../data?...": Forbidden
 ```
 
-The session's network policy confirms it: `production.cloudfront.docker.com:443
--> connect_rejected (gateway answered 403 to CONNECT)`. DynamoDB Local, MinIO
-and ElasticMQ therefore never come up.
+and the network policy confirmed it: `production.cloudfront.docker.com:443 ->
+connect_rejected (gateway answered 403 to CONNECT)`. Either way DynamoDB Local,
+MinIO and ElasticMQ never come up, and the 92 stack-dependent tests stay
+skipped.
 
 **OCR language data cannot be downloaded.** Running the OCR suite without
 `SKIP_OCR_TESTS=1` produces:
@@ -532,6 +551,8 @@ thing. What exists, and what it is worth:
 | Revocation removes the record, its documents and its summaries from the second device | `pullService.test.ts` | as above |
 | A synthetic report produces a persisted summary only with consent, and none without | `backend/test/integration/consentWiring.test.ts` — the real worker, the real repository port, the same `consentFor` wiring `worker.ts` uses | It used the in-memory repository fake, not DynamoDB Local |
 | Grants, roles and refusals on every `/v1` route | `backend/test/unit/*Routes.test.ts` — the real Fastify app via `app.inject`, real tokens | Storage is the in-memory fake, so conditional writes and key shapes are untested |
+| One account creates a follow-up, the second sees it, completes it, and the completion comes back | `src/services/sync/pullService.test.ts` (both directions through the real merge and store) and `backend/test/unit/followUpRoutes.test.ts` (create → lost response → retry → edit → delete, as one task) | The two halves are proven separately, against a fake `fetch` and an in-memory store. No request has crossed a network |
+| An erasure that is interrupted, and a write that races it | `backend/test/unit/privacyRights.test.ts`, and the adapter's own paging in `patientRecordRepository.test.ts` against a faked DynamoDB client | The fence and the paging are proven; DynamoDB's real page boundaries and its conditional writes are not |
 
 **No document has travelled from a camera through upload, a worker, a provider
 and back to a second account's screen.** That needs the local stack at minimum.
@@ -560,6 +581,77 @@ open.
 | 5 | Export and deletion with per-record permissions | **Fixed.** Per-record export naming the role it was produced under; `self`-only record deletion with a typed name; account deletion that refuses to strand a record and names the ones that would be. Two false promises removed from the UI — a seven-day grace period and an emailed download link, neither of which existed |
 | 6 | Evidence gaps | **Partly closed.** Gates re-run and recorded above with the commit SHA; the synthetic two-account journey is proven at the level stated in the table above. The two blocked gates are unchanged, with their actual errors recorded |
 
+## Review round three — the five functional blockers
+
+Posted on PR #1 against `49484d2`. All five were locally executable and all five
+are fixed; each is its own commit, and each is stated below with what it does
+not cover.
+
+| # | Item | Outcome | Commit |
+| --- | --- | --- | --- |
+| 1 | Follow-up creation lost its identity; a retry could duplicate the task | **Fixed** | `8d6bef5` |
+| 2 | Shared follow-ups had no pull path | **Fixed** | `3f6baf0` |
+| 3 | Record deletion could report success while retaining data | **Fixed** | `527048b` |
+| 4 | Withdrawing consent mid-job left a permanent `processing` state | **Fixed** | `51c3dbe` |
+| 5 | The per-parent export asked for the whole account and produced no file | **Fixed** | `9c0aa01` |
+
+**1 — Identity.** The device's id travels with the create and the server takes
+it, so a task keeps one identity from the moment somebody types it. The create
+is idempotent on that id: a POST naming a task that already exists returns it
+with a 200, no second row and no second audit entry. The id is constrained to
+characters that cannot forge a sort key, and a response carrying a different id
+fails loudly rather than being reconciled silently — the alternative surfaces
+much later as a 404 on an edit, a long way from its cause. `missed` was added to
+the statuses the server accepts: the app has always had it, so "we missed
+Thursday's clinic" was being saved on one phone and rejected on its way to
+everybody else's.
+
+**2 — Pull.** Follow-ups are fetched with each record's documents, in the same
+pass and under the same failure handling. `mergeFollowUps` holds the rules: a
+change still in the outbox keeps this device's row, otherwise the server wins,
+and a task the server no longer returns has been deleted by somebody — unless
+that record was not pulled at all, in which case a failed request is evidence of
+nothing. A status or kind this app does not recognise reads as `scheduled` and
+`other` rather than being cast, because an unknown status must never render as
+done. Observations, treatments and dose events remain local-only, as before, and
+`mutationSender` still refuses them explicitly rather than queueing against a
+route that does not exist.
+
+**3 — Deletion.** Two defects. The sweep ignored `LastEvaluatedKey`, so a record
+larger than one query page lost its first page and kept the rest while reporting
+that it was gone; every query in the repository had the same shape, so listing a
+large record was silently truncated too. And nothing recorded that a deletion was
+under way, so an upload signed a minute earlier or a worker finishing an older
+job wrote rows in behind the sweep. A deletion is now an operation: a marker goes
+down first and every write path answers `410 Gone` while it stands, bytes go
+before rows, grants are revoked with the caller's own last, and the marker comes
+down only at the end — which is what makes a second call a resume rather than a
+fresh deletion of a record that is already half gone. A resume does not ask for
+the typed name again, because the profile row it would be checked against is
+already deleted; it is still `self` only.
+
+**4 — Consent withdrawn mid-run.** The result was correctly discarded and the
+document was left saying `processing` for ever, with the job acknowledged and
+nothing left in the queue to move it. It now ends at `manual_review` /
+`ai_not_permitted`, which is terminal on purpose — and
+`POST .../processing/resume` is the way back for somebody who changes their mind,
+taking `manage_consent` rather than `upload_document`, because the decision being
+acted on is the consent decision itself.
+
+**5 — Export.** The per-parent screen called the account-wide endpoint, so
+somebody helping with two parents got both people's histories from a button
+naming one of them. It now calls the per-patient endpoint and writes the file to
+the share sheet, so the copy can actually leave. The file is deleted as soon as
+the sheet closes: a JSON file holding a medical history, sitting in app storage
+where no deletion path knows about it, is the second copy the export is designed
+not to create.
+
+**What these do not prove.** Every test above ran against a fake `fetch`, the
+in-memory repository, or a faked DynamoDB client. The two blocked gates are
+unchanged. **No document has travelled from a camera through upload, a worker, a
+provider and back to a second account's screen**, and no follow-up has crossed a
+real network between two accounts. The readiness levels below are unchanged.
+
 ## Resume checkpoint
 
 Next, in order:
@@ -571,7 +663,9 @@ Next, in order:
    synthetic report going through the worker.
 3. **Send observations, treatments and dose events to `/v1`.** They are stored
    and shared through no endpoint yet; `mutationSender` refuses them explicitly
-   rather than pretending.
-4. **Write the export to a file on the phone.** The data is assembled and
-   returned; there is nowhere on the device to put it.
+   rather than pretending. This is the last of the shared-care acceptance
+   criteria that is unstarted rather than unverified.
+4. **Exercise the export and the share sheet on a device.** The file is written
+   and offered; whether the sheet behaves as intended on iOS and Android is
+   untested here, like everything else native in this branch.
 5. Everything in `DEPLOYMENT.md` § "What is blocked", once there is an account.
