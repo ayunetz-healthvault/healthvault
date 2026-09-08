@@ -2,7 +2,10 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import type { AccessRepository } from '../../services/access/AccessRepository.js';
-import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
+import {
+  RecordDeletedError,
+  type PatientRecordRepository,
+} from '../../services/records/PatientRecordRepository.js';
 import type { ObjectStore } from '../../services/objects/ObjectStore.js';
 import { requireAccess } from './requireAccess.js';
 import { callerOf, notFound } from './shared.js';
@@ -39,6 +42,15 @@ export interface PrivacyRightsOptions {
   objects: ObjectStore;
   /** How long a page URL in an export lasts. Minutes, like every other one. */
   pageUrlTtlSeconds?: number;
+  /**
+   * How long an upload URL stays valid, from the stack config.
+   *
+   * Reported by a deletion rather than assumed by it: it is exactly the window
+   * in which bytes can still arrive for a record that has just been erased,
+   * because a presigned URL outlives the request that issued it and nothing
+   * here can revoke one.
+   */
+  uploadUrlTtlSeconds?: number;
 }
 
 const DEFAULT_PAGE_URL_TTL_SECONDS = 900;
@@ -64,7 +76,13 @@ const invalid = (message: string) => ({
 
 export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = async (
   app,
-  { access, patients, objects, pageUrlTtlSeconds = DEFAULT_PAGE_URL_TTL_SECONDS },
+  {
+    access,
+    patients,
+    objects,
+    pageUrlTtlSeconds = DEFAULT_PAGE_URL_TTL_SECONDS,
+    uploadUrlTtlSeconds = DEFAULT_PAGE_URL_TTL_SECONDS,
+  },
 ) => {
   /**
    * Everything one record holds, as it stands right now.
@@ -269,22 +287,34 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
         });
       }
 
-      // Bytes first. A row deleted before its object leaves the object with
-      // nothing pointing at it — unreachable, undeletable, and still there.
+      /**
+       * Bytes first, by prefix rather than by row.
+       *
+       * A row deleted before its object leaves the object with nothing pointing
+       * at it — unreachable, undeletable, and still there. Deriving the keys
+       * from the rows had exactly that failure in it: pages uploaded through a
+       * URL signed before the deletion began have no row to derive a key from,
+       * and neither do pages whose document row an earlier partial deletion had
+       * already removed. The prefix is the record, so the prefix is what gets
+       * swept.
+       */
       const documents = await patients.listDocuments(params.data.patientId);
-      for (const document of documents) {
-        for (let page = 1; page <= document.pageCount; page += 1) {
-          await objects.delete(
-            objects.keyFor({
-              patientId: params.data.patientId,
-              documentId: document.documentId,
-              page,
-            }),
-          );
-        }
-      }
+      const prefix = objects.prefixFor(params.data.patientId);
+      const firstSweep = await objects.deletePrefix(prefix);
 
       const { items } = await patients.deleteEverythingFor(params.data.patientId);
+
+      /**
+       * A second sweep, after the rows have gone.
+       *
+       * A presigned upload URL outlives the request that issued it, so bytes
+       * can still arrive while the row sweep runs; the second pass catches
+       * those. It does not catch everything — a URL signed a minute before the
+       * deletion stays valid for its full lifetime, and nothing here can revoke
+       * it — so the response says how long that window is rather than claiming
+       * the bytes are certainly all gone.
+       */
+      const secondSweep = await objects.deletePrefix(prefix);
 
       /**
        * Every grant is revoked, so nobody is left holding access to a record
@@ -308,21 +338,34 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
       }
 
       /**
-       * The fence comes down last, once there is nothing left to fence.
+       * The marker becomes a tombstone, last, once there is nothing left to
+       * fence.
        *
-       * Anything that failed above leaves it standing, which is exactly what
-       * makes the next call a resume rather than a fresh deletion of a record
-       * that is already half gone.
+       * Not removed. A marker taken down here would let a write that was
+       * paused during the sweep — a worker mid-pipeline, an upload completing —
+       * resume a second later and write into the partition that has just been
+       * emptied, with nothing left to say the record had ever been deleted.
+       * Anything that failed above leaves the marker in its `deleting` state,
+       * which is what makes the next call a resume rather than a fresh deletion
+       * of a record that is already half gone.
        */
-      await patients.clearDeletion(params.data.patientId);
+      await patients.completeDeletion(params.data.patientId, new Date().toISOString());
 
       return reply.send({
         deleted: true,
         /** True when this call finished an erasure an earlier one had begun. */
         resumed: started !== null,
         itemsRemoved: items,
-        pagesRemoved: documents.reduce((total, document) => total + document.pageCount, 0),
+        pagesRemoved: firstSweep.objects + secondSweep.objects,
+        /** What the record's own rows said it held, for comparison. */
+        pagesExpected: documents.reduce((total, document) => total + document.pageCount, 0),
         grantsRevoked: grants.length,
+        /**
+         * Said rather than implied, because it is the one gap this path cannot
+         * close by itself: an upload URL signed before the deletion keeps
+         * working until it expires.
+         */
+        lateUploadWindowSeconds: uploadUrlTtlSeconds,
         /**
          * Said rather than implied. Copies on other people's phones go when
          * those phones next reach the server, which may be tomorrow — and a
@@ -376,15 +419,29 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
       const now = new Date().toISOString();
       for (const grant of grants) {
         await access.revokeGrant(grant.patientId, accountId, accountId);
-        await patients.appendAudit({
-          eventId: `${now}-account-deleted-${grant.patientId}`,
-          patientId: grant.patientId,
-          actorAccountId: accountId,
-          action: 'access_removed_on_account_deletion',
-          entity: 'grant',
-          entityId: accountId,
-          at: now,
-        });
+
+        /**
+         * The audit entry is a write like any other, and a record that is being
+         * erased refuses it.
+         *
+         * That is the right refusal — there is nothing left to write it into —
+         * and it must not fail the account deletion around it. The access has
+         * already been revoked by the line above, which is what this request
+         * was for.
+         */
+        try {
+          await patients.appendAudit({
+            eventId: `${now}-account-deleted-${grant.patientId}`,
+            patientId: grant.patientId,
+            actorAccountId: accountId,
+            action: 'access_removed_on_account_deletion',
+            entity: 'grant',
+            entityId: accountId,
+            at: now,
+          });
+        } catch (error) {
+          if (!(error instanceof RecordDeletedError)) throw error;
+        }
       }
 
       return reply.send({

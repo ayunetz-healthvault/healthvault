@@ -39,6 +39,8 @@ const objects: ObjectStore = {
   get: async () => new Uint8Array(),
   exists: async () => true,
   delete: async () => undefined,
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: async () => ({ objects: 0 }),
 };
 
 const PATIENT = 'pat_1';

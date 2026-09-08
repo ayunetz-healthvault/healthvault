@@ -2,8 +2,10 @@ import { Readable } from 'node:stream';
 
 import {
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -66,6 +68,19 @@ export interface ObjectStore {
   get(key: string): Promise<Uint8Array>;
   exists(key: string): Promise<boolean>;
   delete(key: string): Promise<void>;
+  /** Every object key for one patient's record. */
+  prefixFor(patientId: string): string;
+  /**
+   * Deletes everything under a prefix, however many pages of listing it takes.
+   *
+   * Erasure needs this and per-key deletion cannot do it. Keys derived from the
+   * table's rows only cover pages the table still knows about: bytes uploaded
+   * through a URL signed before the deletion began arrive with no row at all,
+   * and a document row removed by an earlier partial deletion leaves its pages
+   * unreachable and undeletable. The prefix is the record, so the prefix is
+   * what gets swept.
+   */
+  deletePrefix(prefix: string): Promise<{ objects: number }>;
 }
 
 /**
@@ -86,6 +101,15 @@ export interface ObjectStore {
  */
 export const pageKey = ({ patientId, documentId, page }: PageLocation): string =>
   `patients/${patientId}/documents/${documentId}/pages/${String(page).padStart(3, '0')}`;
+
+/**
+ * Everything belonging to one patient, as one prefix.
+ *
+ * The same first two segments as `pageKey`, stated once so the erasure sweep
+ * and the key layout cannot drift apart — a prefix that stopped matching would
+ * delete nothing and report success.
+ */
+export const recordPrefix = (patientId: string): string => `patients/${patientId}/`;
 
 const toBytes = async (body: unknown): Promise<Uint8Array> => {
   if (body instanceof Uint8Array) return body;
@@ -175,6 +199,38 @@ export const createObjectStore = (config: StackConfig): ObjectStore => {
 
     async delete(key) {
       await client.send(new DeleteObjectCommand({ Bucket, Key: key }));
+    },
+
+    prefixFor: recordPrefix,
+
+    /**
+     * Lists and deletes, a page at a time, until the prefix is empty.
+     *
+     * `ListObjectsV2` returns at most 1000 keys with a continuation token, and
+     * `DeleteObjects` takes at most 1000 — so the batch size falls out of the
+     * API rather than being chosen. The listing is re-issued from the start
+     * after each batch rather than followed by token, because deleting as we go
+     * changes the listing underneath us and a token into a mutated listing can
+     * skip keys.
+     */
+    async deletePrefix(prefix) {
+      let removed = 0;
+
+      for (;;) {
+        const listed = await client.send(
+          new ListObjectsV2Command({ Bucket, Prefix: prefix, MaxKeys: 1000 }),
+        );
+        const keys = (listed.Contents ?? []).flatMap((object) =>
+          object.Key === undefined ? [] : [{ Key: object.Key }],
+        );
+
+        if (keys.length === 0) return { objects: removed };
+
+        await client.send(
+          new DeleteObjectsCommand({ Bucket, Delete: { Objects: keys, Quiet: true } }),
+        );
+        removed += keys.length;
+      }
     },
   };
 };

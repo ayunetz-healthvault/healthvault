@@ -6,11 +6,13 @@ import type {
 } from '../../src/services/access/AccessRepository.js';
 import type { Grant } from '../../src/services/access/policy.js';
 import type { ConsentRecord } from '../../src/services/consent/policy.js';
-import type {
-  AuditEntry,
-  DeletionMarker,
-  PatientRecord,
-  PatientRecordRepository,
+import {
+  FollowUpExistsError,
+  RecordDeletedError,
+  type AuditEntry,
+  type DeletionMarker,
+  type PatientRecord,
+  type PatientRecordRepository,
 } from '../../src/services/records/PatientRecordRepository.js';
 import type {
   DocumentRecord,
@@ -188,11 +190,26 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
   const consent: ConsentRecord[] = [];
   const audit: AuditEntry[] = [];
   const deletions = new Map<string, DeletionMarker>();
+  const followUpClaims = new Map<string, { createdAt: string; deletedAt?: string }>();
+
+  /**
+   * The condition the real repository attaches to every write.
+   *
+   * Modelled here rather than left to the integration tests, for the same
+   * reason the conditional grant writes are: a route that depends on it must
+   * fail in both places, not pass against the fake and break on AWS. A write
+   * into a record that is being erased — or has been — is refused, and the
+   * tombstone is what makes the second half of that sentence true.
+   */
+  const refuseIfDeleted = (patientId: string): void => {
+    if (deletions.has(patientId)) throw new RecordDeletedError(patientId);
+  };
 
   const key = (patientId: string, id: string): string => `${patientId}::${id}`;
 
   return {
     async putPatient(patient) {
+      refuseIfDeleted(patient.patientId);
       patients.set(patient.patientId, patient);
     },
     async getPatient(patientId) {
@@ -206,7 +223,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
       const prefix = `${patientId}::`;
       let items = 0;
 
-      for (const store of [documents, processing, summaries, followUps]) {
+      for (const store of [documents, processing, summaries, followUps, followUpClaims]) {
         for (const entryKey of [...store.keys()]) {
           if (entryKey.startsWith(prefix)) {
             store.delete(entryKey);
@@ -234,23 +251,28 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
      * The fence, modelled here because the routes depend on it.
      *
      * Kept out of `deleteEverythingFor` above for the same reason the real
-     * repository keeps it: the marker outlives the sweep, and the caller takes
-     * it down once the objects are gone too.
+     * repository keeps it: the marker outlives the sweep, and becomes the
+     * tombstone that refuses writes for ever afterwards.
      */
     async beginDeletion(marker) {
       const existing = deletions.get(marker.patientId);
       if (existing !== undefined) return existing;
-      deletions.set(marker.patientId, marker);
-      return marker;
+
+      const started: DeletionMarker = { ...marker, status: 'deleting' };
+      deletions.set(marker.patientId, started);
+      return started;
     },
     async getDeletion(patientId) {
       return deletions.get(patientId) ?? null;
     },
-    async clearDeletion(patientId) {
-      deletions.delete(patientId);
+    async completeDeletion(patientId, completedAt) {
+      const existing = deletions.get(patientId);
+      if (existing === undefined) return;
+      deletions.set(patientId, { ...existing, status: 'deleted', completedAt });
     },
 
     async putDocument(patientId, document) {
+      refuseIfDeleted(patientId);
       documents.set(key(patientId, document.documentId), document);
     },
     async getDocument(patientId, documentId) {
@@ -266,6 +288,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
     },
 
     async putProcessing(patientId, record) {
+      refuseIfDeleted(patientId);
       processing.set(key(patientId, record.documentId), record);
     },
     async getProcessing(patientId, documentId) {
@@ -278,6 +301,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
     },
 
     async putSummary(patientId, summary) {
+      refuseIfDeleted(patientId);
       summaries.set(key(patientId, summary.documentId), summary);
     },
     async getSummary(patientId, documentId) {
@@ -289,8 +313,42 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
         .map(([, value]) => value.documentId);
     },
 
-    async putFollowUp(patientId, followUp) {
+    /**
+     * The claim, modelled because the route's idempotency now depends on it.
+     *
+     * A fake cannot show two concurrent creates racing, but it can show the
+     * second one being refused — which is the behaviour the route is written
+     * against, and the reason the loser no longer overwrites the winner.
+     */
+    async createFollowUp(patientId, followUp) {
+      refuseIfDeleted(patientId);
+      if (followUpClaims.has(key(patientId, followUp.followUpId))) {
+        throw new FollowUpExistsError(followUp.followUpId);
+      }
+
+      followUpClaims.set(key(patientId, followUp.followUpId), { createdAt: followUp.createdAt });
       followUps.set(key(patientId, followUp.followUpId), followUp);
+    },
+
+    async putFollowUp(patientId, followUp) {
+      refuseIfDeleted(patientId);
+      followUps.set(key(patientId, followUp.followUpId), followUp);
+    },
+
+    /**
+     * Keyed by id here, so the move is a plain overwrite — the due date is only
+     * part of the key in the real repository. What this fake does model is the
+     * part the route depends on: moving a task leaves its claim alone, so a
+     * delayed retry of the original create still finds the id taken rather than
+     * free.
+     */
+    async moveFollowUp(patientId, _previousDueDate, followUp) {
+      refuseIfDeleted(patientId);
+      followUps.set(key(patientId, followUp.followUpId), followUp);
+    },
+
+    async followUpClaim(patientId, followUpId) {
+      return followUpClaims.get(key(patientId, followUpId)) ?? null;
     },
     async listFollowUps(patientId) {
       return [...followUps.entries()]
@@ -309,9 +367,20 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
      */
     async deleteFollowUp(patientId, _dueDate, followUpId) {
       followUps.delete(key(patientId, followUpId));
+
+      // The claim outlives the row, so a delayed duplicate of the original
+      // create cannot put a deleted appointment back.
+      const claim = followUpClaims.get(key(patientId, followUpId));
+      if (claim !== undefined) {
+        followUpClaims.set(key(patientId, followUpId), {
+          ...claim,
+          deletedAt: new Date().toISOString(),
+        });
+      }
     },
 
     async appendConsent(record) {
+      refuseIfDeleted(record.patientId);
       // Append-only, exactly like the real one: the history is the point.
       consent.push(record);
     },
@@ -322,6 +391,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
     },
 
     async appendAudit(entry) {
+      refuseIfDeleted(entry.patientId);
       audit.push(entry);
     },
     async listAudit(patientId, limit = 50) {

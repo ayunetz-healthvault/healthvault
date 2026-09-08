@@ -56,6 +56,8 @@ const objects: ObjectStore = {
   get: async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
   exists: async () => true,
   delete: async () => undefined,
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: async () => ({ objects: 0 }),
 };
 
 const succeedingProcessor = (): DocumentProcessor => ({

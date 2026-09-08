@@ -228,3 +228,24 @@ export const PATIENT_AUDIT_PREFIX = 'AUDIT#';
  * erasure sweeps the partition.
  */
 export const PATIENT_DELETION_SK = '!DELETION';
+
+/**
+ * One item per follow-up id, holding nothing but the claim on that id.
+ *
+ * The follow-up's own key contains its due date, because "everything due before
+ * Friday" is the query that makes the record useful. That makes the row key a
+ * poor identity: moving an appointment moves its key, so a condition written
+ * against it stops guarding the same task the moment somebody reschedules.
+ *
+ * This is the identity, and it does not move. A create writes it with
+ * `attribute_not_exists`, so two overlapping retries of the same create cannot
+ * both succeed — the loser is refused at commit rather than quietly overwriting
+ * a task the winner created and somebody has since completed. It outlives the
+ * row it names, carrying `deletedAt`, so a delayed duplicate of a create whose
+ * task has since been deleted cannot put the appointment back.
+ *
+ * `FUPID#` deliberately does not begin with `FUP#`, so the claims are invisible
+ * to the query that lists a record's follow-ups.
+ */
+export const patientFollowUpIdSk = (followUpId: string): string => `FUPID#${followUpId}`;
+export const PATIENT_FOLLOW_UP_ID_PREFIX = 'FUPID#';

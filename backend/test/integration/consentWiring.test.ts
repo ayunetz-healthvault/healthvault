@@ -43,6 +43,8 @@ const objects: ObjectStore = {
   get: async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
   exists: async () => true,
   delete: async () => undefined,
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: async () => ({ objects: 0 }),
 };
 
 /** A synthetic lab report result. Nothing here came from a real document. */
@@ -450,5 +452,135 @@ describe('re-queuing after the answer changes', () => {
     const second = await patients.getSummary(PATIENT, DOCUMENT);
 
     expect(second).toEqual(first);
+  });
+});
+
+/**
+ * A write that was paused while the erasure ran, and resumed after it finished.
+ *
+ * The case a marker taken down at the end cannot cover, and the one that
+ * matters most: the worker read the marker, saw nothing, and by the time it
+ * wrote the summary the record had been erased and the sweep had moved on. The
+ * summary landed in the partition that had just been emptied — the clinical
+ * content of a record somebody had deleted, put back by a job they never saw.
+ *
+ * The condition now travels with the write, so the write is refused whether the
+ * deletion is in progress or already finished.
+ */
+describe('a write that resumes after the record is gone', () => {
+  const eraseCompletely = async (): Promise<void> => {
+    await patients.beginDeletion({
+      patientId: PATIENT,
+      requestedByAccountId: OWNER,
+      requestedAt: '2026-09-08T10:15:00.000Z',
+    });
+    await patients.deleteEverythingFor(PATIENT);
+    await patients.completeDeletion(PATIENT, '2026-09-08T10:16:00.000Z');
+  };
+
+  /**
+   * The erasure finishes entirely while the provider call is outstanding. The
+   * document row has gone with it, so the worker stops at the missing document
+   * — the point is what is *not* there afterwards.
+   */
+  it('writes nothing when the record is erased mid-pipeline', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const eraseMidRun: DocumentProcessor = {
+      process: vi.fn(async ({ documentId }) => {
+        // The whole erasure completes while the provider call is outstanding.
+        await eraseCompletely();
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'Kidney function is stable.' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      }),
+    };
+
+    const outcome = await buildWorker(eraseMidRun).handle(job());
+
+    expect(outcome.result).toBe('skipped');
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toBeNull();
+  });
+
+  /**
+   * The same race with the sweep still running, which is where the write itself
+   * has to do the refusing: the document row is still there, every check the
+   * worker makes passes, and only the condition on the write stands between a
+   * deleted record and a summary of it.
+   */
+  it('refuses the summary while the sweep is still running', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const beginMidRun: DocumentProcessor = {
+      process: vi.fn(async ({ documentId }) => {
+        await patients.beginDeletion({
+          patientId: PATIENT,
+          requestedByAccountId: OWNER,
+          requestedAt: '2026-09-08T10:15:00.000Z',
+        });
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'Kidney function is stable.' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      }),
+    };
+
+    const outcome = await buildWorker(beginMidRun).handle(job());
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'record_deleting' });
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+    // Still `processing` from the start of the run: the erasure will remove it.
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({
+      status: 'processing',
+    });
+  });
+
+  /**
+   * The error path too. A pipeline exception during an erasure would otherwise
+   * write a `failed` row into the swept partition, leaving a deleted record
+   * holding one row saying something had gone wrong with it.
+   */
+  it('refuses to record a failure against a record that is gone', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const failMidRun: DocumentProcessor = {
+      process: vi.fn(async () => {
+        await eraseCompletely();
+        throw new Error('the pipeline fell over');
+      }),
+    };
+
+    const outcome = await buildWorker(failMidRun).handle(job());
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'record_deleting' });
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toBeNull();
+  });
+
+  /** And it is not treated as a failure worth retrying, which would cost a run. */
+  it('does not spend an attempt on a record that cannot be written to', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+    await eraseCompletely();
+
+    const documentProcessor = processor();
+    const outcome = await buildWorker(documentProcessor).handle(job());
+
+    expect(documentProcessor.process).not.toHaveBeenCalled();
+    expect(outcome.result).toBe('skipped');
   });
 });

@@ -164,7 +164,12 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
     await v1.register(reviewRoutes, { access, patients, objects });
     await v1.register(consentRoutes, { access, patients });
     await v1.register(followUpRoutes, { access, patients });
-    await v1.register(privacyRightsRoutes, { access, patients, objects });
+    await v1.register(privacyRightsRoutes, {
+      access,
+      patients,
+      objects,
+      uploadUrlTtlSeconds: stack.presignTtlSeconds,
+    });
   });
 
   /**

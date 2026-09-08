@@ -6,7 +6,10 @@ import type { AccessRepository } from '../access/AccessRepository.js';
 import type { ObjectStore } from '../objects/ObjectStore.js';
 import type { JobQueue, ProcessingJob } from '../queue/JobQueue.js';
 import { permits, type ConsentRecord } from '../consent/policy.js';
-import type { PatientRecordRepository } from '../records/PatientRecordRepository.js';
+import {
+  RecordDeletedError,
+  type PatientRecordRepository,
+} from '../records/PatientRecordRepository.js';
 import { ProcessingError, type DocumentProcessor, type TemporaryPage } from '../../types/processing.js';
 
 /**
@@ -181,13 +184,19 @@ export const createDocumentWorker = ({
     }
 
     /**
-     * An erasure is under way.
+     * An erasure is under way, or has already happened.
      *
      * The grant check above does not cover this: deletion revokes grants at the
      * end, so there is a window in which a record is being emptied and still
-     * looks reachable. Writing a `processing` row into it during that window
-     * puts a row back into a partition somebody has just asked to have cleared
-     * — and the erasure, having already swept past, reports success.
+     * looks reachable.
+     *
+     * This read is an early exit, not the guarantee. Reading a marker and then
+     * writing is a race whatever the gap between them, and this job can be
+     * paused between the two for as long as the pipeline takes: the erasure can
+     * finish in that window. The guarantee is on the writes themselves — every
+     * one of them is conditional on the marker's absence, in the same
+     * transaction — so what this saves is an OCR run and a provider call, not
+     * correctness.
      */
     if ((await patients.getDeletion(patientId)) !== null) {
       log({ kind: 'skipped', documentId, reason: 'record_deleting' });
@@ -220,12 +229,22 @@ export const createDocumentWorker = ({
     }
 
     log({ kind: 'started', documentId, attempt });
-    await patients.putProcessing(patientId, {
-      documentId,
-      status: 'processing',
-      attempts: attempt,
-      updatedAt: new Date().toISOString(),
-    });
+    try {
+      await patients.putProcessing(patientId, {
+        documentId,
+        status: 'processing',
+        attempts: attempt,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      // The erasure won the race between the read above and this write. Nothing
+      // to record, and nothing to process.
+      if (error instanceof RecordDeletedError) {
+        log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+        return { job, result: 'skipped', reason: 'record_deleting' };
+      }
+      throw error;
+    }
 
     /**
      * Scratch space, deleted in `finally` whatever happens.
@@ -308,11 +327,12 @@ export const createDocumentWorker = ({
          * truthful end state: nothing failed, the original is there to read,
          * and no summary is coming until somebody changes their mind.
          *
-         * Guarded by the deletion marker, because the reason consent vanished
-         * mid-run may be that the whole record is being erased — and this write
-         * would put a row back into a partition that has just been swept.
+         * The write itself is conditional on the record not being erased —
+         * the reason consent vanished mid-run may be that the whole record is
+         * going — so a deletion that finished while this job ran refuses it
+         * rather than putting a row back into a swept partition.
          */
-        if ((await patients.getDeletion(patientId)) === null) {
+        try {
           await patients.putProcessing(patientId, {
             documentId,
             status: 'manual_review',
@@ -320,23 +340,23 @@ export const createDocumentWorker = ({
             failureCode: 'ai_not_permitted',
             updatedAt: new Date().toISOString(),
           });
+        } catch (error) {
+          if (!(error instanceof RecordDeletedError)) throw error;
+          log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+          return { job, result: 'skipped', reason: 'record_deleting' };
         }
 
         return { job, result: 'skipped', reason: 'ai_not_permitted' };
       }
 
       /**
-       * The erasure fence, re-read immediately before the write.
+       * The summary write is conditional on the record not being erased.
        *
-       * A deletion that began while the pipeline ran has already swept the
-       * partition. Writing the summary now would recreate the clinical content
-       * of a record somebody deleted, which is the worst version of this bug.
+       * Reading the marker here instead — which is what this replaces — was a
+       * race with a wide window: the erasure could complete between the read
+       * and the write, and the summary landed in the partition it had just
+       * emptied. The condition is evaluated where it has to be, at commit.
        */
-      if ((await patients.getDeletion(patientId)) !== null) {
-        log({ kind: 'skipped', documentId, reason: 'record_deleting' });
-        return { job, result: 'skipped', reason: 'record_deleting' };
-      }
-
       await patients.putSummary(patientId, {
         documentId,
         summary: response.summary,
@@ -364,6 +384,20 @@ export const createDocumentWorker = ({
       log({ kind: 'succeeded', documentId, durationMs: Date.now() - startedAt });
       return { job, result: 'succeeded' };
     } catch (error) {
+      /**
+       * The record was erased while this job ran.
+       *
+       * Not a processing failure, and emphatically not a retry: the write was
+       * refused because there is nothing left to write into. Treating it as a
+       * failure would spend the attempt budget re-reading a deleted person's
+       * pages, and would try to record that failure in the partition that has
+       * just been emptied.
+       */
+      if (error instanceof RecordDeletedError) {
+        log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+        return { job, result: 'skipped', reason: 'record_deleting' };
+      }
+
       const failure =
         error instanceof ProcessingError
           ? error
@@ -391,15 +425,28 @@ export const createDocumentWorker = ({
           ? 'manual_review'
           : 'failed';
 
-      await patients.putProcessing(patientId, {
-        documentId,
-        status: terminal ? status : 'queued',
-        attempts: attempt,
-        // The code, never the message: a pipeline error can quote the text it
-        // was reading. ADR-001.
-        failureCode: failure.code,
-        updatedAt: new Date().toISOString(),
-      });
+      /**
+       * Recording the failure is a write like any other, and this is where the
+       * guard was missing: a pipeline exception during an erasure would
+       * otherwise write a `failed` row into the partition that had just been
+       * swept, leaving a deleted record holding one row saying something had
+       * gone wrong with it.
+       */
+      try {
+        await patients.putProcessing(patientId, {
+          documentId,
+          status: terminal ? status : 'queued',
+          attempts: attempt,
+          // The code, never the message: a pipeline error can quote the text it
+          // was reading. ADR-001.
+          failureCode: failure.code,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (writeError) {
+        if (!(writeError instanceof RecordDeletedError)) throw writeError;
+        log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+        return { job, result: 'skipped', reason: 'record_deleting' };
+      }
 
       if (terminal) {
         log({ kind: 'dead_lettered', documentId, code: failure.code });

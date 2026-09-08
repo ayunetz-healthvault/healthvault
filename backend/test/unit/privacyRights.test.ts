@@ -33,6 +33,8 @@ const silent = (): NodeJS.WritableStream =>
   ({ write: () => true }) as unknown as NodeJS.WritableStream;
 
 const deleted: string[] = [];
+/** What the bucket holds, so a prefix sweep can be asserted rather than assumed. */
+const stored = new Set<string>();
 
 const objects: ObjectStore = {
   keyFor: ({ patientId, documentId, page }) =>
@@ -44,6 +46,16 @@ const objects: ObjectStore = {
   exists: async () => true,
   delete: vi.fn(async (key: string) => {
     deleted.push(key);
+    stored.delete(key);
+  }),
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: vi.fn(async (prefix: string) => {
+    const matching = [...stored].filter((key) => key.startsWith(prefix));
+    for (const key of matching) {
+      deleted.push(key);
+      stored.delete(key);
+    }
+    return { objects: matching.length };
   }),
 };
 
@@ -96,6 +108,9 @@ const seedRecord = async (patientId: string, fullName: string): Promise<void> =>
     createdAt: NOW,
     updatedAt: NOW,
   });
+  // The bytes those pages refer to, so an erasure has something to sweep.
+  stored.add(`patients/${patientId}/documents/doc_1/pages/001`);
+  stored.add(`patients/${patientId}/documents/doc_1/pages/002`);
   await patients.putProcessing(patientId, {
     documentId: 'doc_1',
     status: 'ready',
@@ -146,7 +161,10 @@ const deleteRecord = async (accountId: string, confirmName: string, patientId = 
   });
 
 beforeEach(async () => {
+  // Call counts only; the implementations above are kept.
+  vi.clearAllMocks();
   deleted.length = 0;
+  stored.clear();
   access = inMemoryAccessRepository();
   patients = inMemoryPatientRepository();
   app = buildApp({
@@ -273,8 +291,12 @@ describe('deleting a record', () => {
     expect(await patients.getPatient(PATIENT)).toBeNull();
     expect(await patients.listDocuments(PATIENT)).toEqual([]);
     expect(await patients.getSummary(PATIENT, 'doc_1')).toBeNull();
-    // Both pages, by key, before the rows that name them were removed.
-    expect(deleted).toHaveLength(2);
+    // Both pages, swept by prefix before the rows that name them were removed.
+    expect(deleted.sort()).toEqual([
+      `patients/${PATIENT}/documents/doc_1/pages/001`,
+      `patients/${PATIENT}/documents/doc_1/pages/002`,
+    ]);
+    expect(stored.size).toBe(0);
   });
 
   it('revokes everybody’s access, so nobody holds a key to nothing', async () => {
@@ -491,7 +513,8 @@ describe('a deletion in progress', () => {
     expect(response.json()).toMatchObject({ deleted: true, resumed: true });
     expect(await patients.listDocuments(PATIENT)).toEqual([]);
     expect(await patients.getSummary(PATIENT, 'doc_1')).toBeNull();
-    expect(await patients.getDeletion(PATIENT)).toBeNull();
+    // A tombstone, not an absence: see below.
+    expect(await patients.getDeletion(PATIENT)).toMatchObject({ status: 'deleted' });
   });
 
   /** A resume is still `self` only. Being half-deleted widens nothing. */
@@ -511,10 +534,59 @@ describe('a deletion in progress', () => {
     expect(await patients.getPatient(PATIENT)).not.toBeNull();
   });
 
-  it('takes the fence down only when there is nothing left to fence', async () => {
+  /**
+   * The marker becomes a tombstone rather than being removed.
+   *
+   * This is the difference between an erasure that is thorough and one that is
+   * permanent. A write paused during the sweep — a worker mid-pipeline, an
+   * upload completing — resumes a moment later; with the marker gone there
+   * would be nothing left to tell it the record had ever been deleted, and it
+   * would write into the partition that had just been emptied.
+   */
+  it('leaves a tombstone rather than clearing the marker', async () => {
     await deleteRecord('acc_alice', 'Meera Nair');
 
-    expect(await patients.getDeletion(PATIENT)).toBeNull();
+    expect(await patients.getDeletion(PATIENT)).toMatchObject({
+      status: 'deleted',
+      requestedByAccountId: 'acc_alice',
+    });
+  });
+
+  it('refuses a write that resumes after the erasure has finished', async () => {
+    await deleteRecord('acc_alice', 'Meera Nair');
+
+    // Exactly what a worker holding a summary would attempt on waking up.
+    await expect(
+      patients.putSummary(PATIENT, {
+        documentId: 'doc_1',
+        summary: { overview: 'Stable.' },
+        pipelineVersion: 'redaction-v1',
+        createdAt: NOW,
+      }),
+    ).rejects.toMatchObject({ name: 'RecordDeletedError' });
+
+    expect(await patients.getSummary(PATIENT, 'doc_1')).toBeNull();
+  });
+
+  /**
+   * Bytes that arrive after the row sweep. A URL signed before the deletion
+   * began keeps working until it expires, so the object prefix is swept again
+   * after the rows have gone, and the response says how long that window is
+   * rather than claiming the bytes are certainly all gone.
+   */
+  it('sweeps the object prefix again after the rows are gone', async () => {
+    await deleteRecord('acc_alice', 'Meera Nair');
+
+    expect(objects.deletePrefix).toHaveBeenCalledTimes(2);
+    expect(objects.deletePrefix).toHaveBeenCalledWith(`patients/${PATIENT}/`);
+  });
+
+  it('says how long a presigned upload can still land', async () => {
+    const body = (await deleteRecord('acc_alice', 'Meera Nair')).json() as {
+      lateUploadWindowSeconds: number;
+    };
+
+    expect(body.lateUploadWindowSeconds).toBeGreaterThan(0);
   });
 
   /**
