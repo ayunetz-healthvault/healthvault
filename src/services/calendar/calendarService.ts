@@ -2,6 +2,10 @@ import * as Calendar from 'expo-calendar';
 import { Platform } from 'react-native';
 
 import type { FollowUp, ParentProfile } from '@/types/domain';
+import {
+  DEFAULT_CALENDAR_DETAIL,
+  type CalendarDetail,
+} from '@/services/calendar/calendarMappings';
 import { FOLLOW_UP_KIND_LABELS } from '@/types/labels';
 import { toCalendarDate } from '@/utils/date';
 
@@ -152,24 +156,47 @@ export const calendarService = {
    * Builds exactly what will be written, so the confirmation dialog can show
    * the user the real thing rather than a paraphrase.
    */
-  buildEventPreview(followUp: FollowUp, parent: ParentProfile | undefined): CalendarEventPreview {
+  buildEventPreview(
+    followUp: FollowUp,
+    parent: ParentProfile | undefined,
+    detail: CalendarDetail = DEFAULT_CALENDAR_DETAIL,
+  ): CalendarEventPreview {
     const startDate = toCalendarDate(followUp.dueDate, followUp.dueTime);
     const endDate = new Date(startDate.getTime() + DEFAULT_DURATION_MINUTES * 60 * 1000);
-    const who = parent?.fullName ?? 'your parent';
 
-    const noteLines = [
-      `${FOLLOW_UP_KIND_LABELS[followUp.kind]} for ${who}.`,
-      followUp.notes.trim(),
-      parent?.primaryDoctor ? `Doctor: ${parent.primaryDoctor}` : '',
-      'Added by Ayunetz Health Vault.',
-    ].filter((line) => line.length > 0);
+    /**
+     * The default writes almost nothing.
+     *
+     * A calendar event shows on a lock screen, syncs to whatever the user's
+     * calendar syncs to, and is visible to anybody they share a calendar with.
+     * The previous version put the parent's full name in the title and their
+     * doctor and the appointment's purpose in the notes — a diagnosis-shaped
+     * hint, readable by a colleague glancing at a shared work calendar.
+     *
+     * Nothing here ever carries a condition, a medicine, a finding or the
+     * follow-up's own notes, at any detail level. Those are the record, and the
+     * record stays in the app.
+     */
+    const firstName = parent?.fullName.split(' ')[0] ?? '';
+
+    const title =
+      detail === 'minimal'
+        ? 'Appointment'
+        : `${FOLLOW_UP_KIND_LABELS[followUp.kind]}${firstName ? ` — ${firstName}` : ''}`;
+
+    const notes =
+      detail === 'minimal'
+        ? 'Added by Ayunetz Health Vault. Open the app for the details.'
+        : `${FOLLOW_UP_KIND_LABELS[followUp.kind]}. Open Ayunetz Health Vault for the details.`;
 
     return {
-      title: `${followUp.title} — ${who}`,
+      title,
       startDate,
       endDate,
-      notes: noteLines.join('\n\n'),
-      location: parent?.city ?? '',
+      notes,
+      // The city is a location, not a clinic. A clinic name in a calendar entry
+      // is a specialty, and a specialty is close enough to a diagnosis.
+      location: detail === 'minimal' ? '' : (parent?.city ?? ''),
       reminderMinutes: DEFAULT_REMINDER_MINUTES,
     };
   },
@@ -181,6 +208,7 @@ export const calendarService = {
     followUp: FollowUp,
     parent: ParentProfile | undefined,
     calendarId?: string,
+    detail: CalendarDetail = DEFAULT_CALENDAR_DETAIL,
   ): Promise<CalendarWriteResult> {
     if (!isCalendarAvailable()) return { status: 'unavailable' };
 
@@ -200,7 +228,7 @@ export const calendarService = {
       const writable = await calendarService.getWritableCalendars();
       const target = writable.find((calendar) => calendar.id === targetId);
 
-      const preview = calendarService.buildEventPreview(followUp, parent);
+      const preview = calendarService.buildEventPreview(followUp, parent, detail);
 
       const eventId = await withTimeout(
         Calendar.createEventAsync(targetId, {
