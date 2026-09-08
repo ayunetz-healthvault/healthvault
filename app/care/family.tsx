@@ -12,8 +12,10 @@ import {
   SectionHeader,
   Text,
 } from '@/components';
+import { useAccessStore } from '@/state/accessStore';
 import { countAttentionItems } from '@/state/attention';
 import { useVaultSnapshot } from '@/state/vaultStore';
+import { ROLE_DESCRIPTIONS } from '@/types/access';
 import { spacing } from '@/theme';
 import { RELATIONSHIP_LABELS } from '@/types/labels';
 import { calculateAge } from '@/utils/date';
@@ -34,6 +36,7 @@ import { pluralise } from '@/utils/format';
 export default function CaregiverFamilyScreen(): React.JSX.Element {
   const router = useRouter();
   const vault = useVaultSnapshot();
+  const roles = useAccessStore((state) => state.roles);
 
   return (
     <Screen testID="care-family">
@@ -56,6 +59,7 @@ export default function CaregiverFamilyScreen(): React.JSX.Element {
         vault.parents.map((parent) => {
           const age = calculateAge(parent.dateOfBirth);
           const attentionCount = countAttentionItems(vault, parent.id);
+          const role = roles[parent.id] ?? null;
 
           return (
             <Card key={parent.id} style={styles.card} testID={`care-family-${parent.id}`}>
@@ -74,11 +78,20 @@ export default function CaregiverFamilyScreen(): React.JSX.Element {
               </View>
 
               <Badge
-                label="You created and hold this record"
+                label={ROLE_DESCRIPTIONS[role ?? 'manager'].label}
                 tone="brand"
                 icon="shield-checkmark-outline"
                 testID={`care-family-role-${parent.id}`}
               />
+
+              <Text variant="caption" tone="secondary">
+                {role === null
+                  ? // Not "read-only" and not "full access": an unknown role
+                    // rendered as either one is wrong in a way the user cannot
+                    // see. Saying it is unknown is the honest answer.
+                    'Checking what you can do with this record…'
+                  : ROLE_DESCRIPTIONS[role].detail}
+              </Text>
 
               <Text variant="callout" tone="secondary" style={styles.spaced}>
                 {attentionCount === 0
@@ -100,12 +113,12 @@ export default function CaregiverFamilyScreen(): React.JSX.Element {
 
       <Callout
         tone="info"
-        title="Sharing is not built yet"
-        // Stated rather than shown as a disabled switch. A control that looks
-        // like it grants access and does nothing is worse than no control: a
-        // helper could believe a parent had been given a login when they had
-        // not.
-        message="A person can only reach their own record once they have their own account and that account has been granted access. Inviting someone, and taking that access back, arrives with the access-grant work."
+        title="How access works"
+        /*
+          Stated plainly, because the model is not obvious and getting it wrong
+          is how a helper believes a parent has a login when they do not.
+        */
+        message="A person can only reach a record once they have their own account and that account has been given access. Open a record and use its Family screen to invite somebody or take their access back."
         testID="care-family-sharing-notice"
       />
     </Screen>
