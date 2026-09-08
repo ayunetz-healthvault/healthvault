@@ -1,4 +1,5 @@
 import { useRouter } from 'expo-router';
+import { useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import {
@@ -6,6 +7,7 @@ import {
   Callout,
   Card,
   DemoNotice,
+  DoseCard,
   EmptyState,
   IdentityHeader,
   Screen,
@@ -13,14 +15,21 @@ import {
   Text,
 } from '@/components';
 import { useExperience } from '@/services/experience';
+import { nextDueDose, recordDose, undoDose } from '@/services/treatment/occurrences';
+import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
 import { useSessionStore } from '@/state/sessionStore';
 import {
+  selectDosesForDay,
   selectFollowUpsForParent,
+  selectLiveSchedules,
   selectParent,
   useVaultSnapshot,
+  useVaultStore,
 } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
+import type { DoseOccurrence, DoseState } from '@/types/treatment';
 import { describeDueDate, formatTime, isOverdue } from '@/utils/date';
+import { pluralise } from '@/utils/format';
 
 /**
  * The parent's Today screen: the next useful action, and very little else.
@@ -31,28 +40,89 @@ import { describeDueDate, formatTime, isOverdue } from '@/utils/date';
  *   2. Otherwise the next appointment, or adding a document.
  *   3. Then visit preparation, capture, a short note, and the family helper.
  *
- * Step 1 renders nothing today, and that is the correct behaviour rather than a
- * gap. A confirmed schedule is a separate record from a medicine an AI read off
- * a prescription — it needs provenance, times and an explicit confirmation, and
- * that model arrives with KOO-10. Until it exists there is no such thing as a
- * dose that is due, so the screen shows the no-treatment state.
+ * ## Where the dose comes from
  *
- * What it must never do is fill the card with a plausible-looking medicine. A
- * sample dose on a real person's home screen is an instruction to take a drug.
+ * From `TreatmentSchedule` records only — medicines somebody confirmed they are
+ * taking, at times somebody chose. Never from a summary. A medicine a model
+ * read off a prescription is a *mention*: it has no times, may have been found
+ * in a two-year-old letter, and nobody has agreed to it. Turning one into a
+ * card with a button would be an instruction to take a drug, issued on the
+ * strength of an OCR pass over a photograph.
+ *
+ * ## Not recorded is not missed
+ *
+ * The card shows an unanswered dose as "not recorded" and offers "I haven't
+ * taken it" as an explicit action. Nothing on this screen ever concludes a
+ * tablet was skipped because nobody opened the app.
  */
 export default function ParentTodayScreen(): React.JSX.Element {
   const router = useRouter();
   const user = useSessionStore((state) => state.user);
   const { selfRecordId } = useExperience();
   const vault = useVaultSnapshot();
+  const appendDoseEvent = useVaultStore((state) => state.appendDoseEvent);
 
   const record = selfRecordId === null ? undefined : selectParent(vault, selfRecordId);
+
+  /**
+   * The patient's own day, not the device's.
+   *
+   * Taken from a live schedule when there is one, because that is where the
+   * zone was recorded; the default only decides what to show somebody who has
+   * no schedule yet, which is a screen with no dose on it either way.
+   */
+  const schedules = record === undefined ? [] : selectLiveSchedules(vault, record.id);
+  const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
+  const today = localDateIn(timezone);
+
+  const doses =
+    record === undefined ? [] : selectDosesForDay(vault, record.id, today);
+  const nextDose = nextDueDose(doses);
+  const recordedToday = doses.filter((dose) => dose.state !== null).length;
+
+  /**
+   * The dose just answered stays on screen.
+   *
+   * Without this the card jumps straight to the evening's dose the moment the
+   * morning one is answered, and the person is left wondering whether their tap
+   * registered — with no way back if it was the wrong button. Holding the
+   * answered dose shows what was recorded and keeps undo within reach.
+   */
+  const [justAnsweredKey, setJustAnsweredKey] = useState<string | null>(null);
+  const shownDose =
+    doses.find((dose) => dose.occurrenceKey === justAnsweredKey) ?? nextDose;
+
   const nextVisit =
     record === undefined
       ? undefined
       : selectFollowUpsForParent(vault, record.id).find((item) => item.status === 'scheduled');
 
   const firstName = (record?.fullName ?? user?.fullName ?? '').split(' ')[0] ?? '';
+
+  /**
+   * Recording is a store append, not an edit.
+   *
+   * `recordDose` returns null when the tap would change nothing — the same dose
+   * already in the same state — and `appendDoseEvent` ignores null, so a double
+   * tap cannot produce two entries for one tablet.
+   */
+  const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
+    appendDoseEvent(
+      recordDose({
+        occurrence,
+        state,
+        recordedBy: user?.id ?? 'usr_local',
+        // This is the patient's own screen, so it is their own confirmation.
+        recordedBySelf: true,
+      }),
+    );
+    setJustAnsweredKey(occurrence.occurrenceKey);
+  };
+
+  const undoFor = (occurrence: DoseOccurrence): void => {
+    appendDoseEvent(undoDose(occurrence, user?.id ?? 'usr_local', true));
+    setJustAnsweredKey(null);
+  };
 
   const header = (
     <IdentityHeader
@@ -88,21 +158,65 @@ export default function ParentTodayScreen(): React.JSX.Element {
         <DemoNotice />
       </View>
 
-      {/*
-        The no-treatment state. It says what is true — nobody has set up a
-        schedule — and offers the action that would change that, rather than
-        implying the absence means anything about the person's health.
-      */}
-      <Card tone="quiet" style={styles.stacked} testID="me-today-no-treatment">
-        <Text variant="caption" tone="secondary">
-          Today
-        </Text>
-        <Text variant="heading">No medicine schedule set up</Text>
-        <Text variant="callout" tone="secondary">
-          When a medicine from your prescription is confirmed, it will appear here with a large
-          button to record that you took it. Nothing is being tracked until then.
-        </Text>
-      </Card>
+      {schedules.length === 0 ? (
+        /*
+          The no-treatment state. It says what is true — nobody has set up a
+          schedule — and offers the action that would change that, rather than
+          implying the absence means anything about the person's health.
+        */
+        <Card tone="quiet" style={styles.stacked} testID="me-today-no-treatment">
+          <Text variant="caption" tone="secondary">
+            Today
+          </Text>
+          <Text variant="heading">No medicine schedule set up</Text>
+          <Text variant="callout" tone="secondary">
+            When a medicine from your prescription is confirmed, it will appear here with a large
+            button to record that you took it. Nothing is being tracked until then.
+          </Text>
+          <Button
+            label="Add a medicine"
+            variant="secondary"
+            icon="medkit-outline"
+            onPress={() => router.push(`/treatment/new?patientId=${record.id}`)}
+            style={styles.action}
+            testID="me-today-add-medicine"
+          />
+        </Card>
+      ) : shownDose !== null ? (
+        <DoseCard
+          occurrence={shownDose}
+          timezone={timezone}
+          bySelf
+          onTaken={() => recordFor(shownDose, 'taken')}
+          onMissed={() => recordFor(shownDose, 'missed')}
+          onUndo={() => undoFor(shownDose)}
+          testID="me-today-dose"
+        />
+      ) : (
+        /*
+          Everything due today has an answer. Said as a fact about the record —
+          not "well done", and not a claim that the medicine is working.
+        */
+        <Card tone="quiet" style={styles.stacked} testID="me-today-doses-done">
+          <Text variant="caption" tone="secondary">
+            Today
+          </Text>
+          <Text variant="heading">Nothing else due today</Text>
+          <Text variant="callout" tone="secondary">
+            {recordedToday === doses.length
+              ? `All ${pluralise(doses.length, 'dose')} for today have been answered.`
+              : 'There is nothing more to record today.'}
+          </Text>
+          <Button
+            label="See today’s medicines"
+            variant="secondary"
+            icon="list-outline"
+            onPress={() => router.push('/me/health')}
+            style={styles.action}
+            testID="me-today-see-medicines"
+          />
+        </Card>
+      )}
 
       {nextVisit === undefined ? (
         <Card tone="appointment" style={styles.stacked} testID="me-today-no-visit">

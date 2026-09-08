@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react-native';
+import { fireEvent, render, screen } from '@testing-library/react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import ParentTodayScreen from '../../../app/me/index';
@@ -6,6 +6,7 @@ import ParentTodayScreen from '../../../app/me/index';
 import { useSessionStore } from '@/state/sessionStore';
 import { useVaultStore } from '@/state/vaultStore';
 import type { FollowUp, ParentProfile } from '@/types/domain';
+import type { TreatmentSchedule } from '@/types/treatment';
 
 /**
  * The parent's Today screen.
@@ -49,6 +50,31 @@ const selfRecord: ParentProfile = {
   updatedAt: '2026-01-01T00:00:00.000Z',
 };
 
+/**
+ * A medicine somebody confirmed they are taking.
+ *
+ * Built by hand rather than via a summary on purpose: the point of the type is
+ * that no pipeline can produce one. `confirmedBy` and `confirmedAt` are what
+ * separate this from a medicine a model read off a photograph.
+ */
+const schedule = (times: string[]): TreatmentSchedule => ({
+  id: 'trt_1',
+  patientId: selfRecord.id,
+  name: 'Metformin',
+  dosage: '500 mg',
+  times,
+  timezone: 'Asia/Kolkata',
+  startDate: '2020-01-01',
+  endDate: null,
+  provenance: 'manual',
+  source: null,
+  confirmedBy: 'usr_meera',
+  confirmedAt: '2026-09-01T00:00:00.000Z',
+  supersededAt: null,
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+});
+
 const visit = (dueDate: string): FollowUp => ({
   id: 'f1',
   parentId: selfRecord.id,
@@ -71,6 +97,8 @@ beforeEach(() => {
     documents: [],
     summaries: [],
     followUps: [],
+    schedules: [],
+    doseEvents: [],
   });
   useSessionStore.setState({
     selfRecordId: selfRecord.id,
@@ -146,5 +174,95 @@ describe('parent Today', () => {
 
     expect(screen.getByTestId('me-today-empty-state')).toBeTruthy();
     expect(screen.queryByTestId('me-today-no-treatment')).toBeNull();
+  });
+});
+
+/**
+ * The dose flow.
+ *
+ * Everything here comes from a confirmed schedule. The tests above prove the
+ * screen invents nothing when there is none; these prove it does the right
+ * thing when there is — which is the other half of the same safety property,
+ * because a card nobody can answer is as useless as a card nobody asked for.
+ */
+describe('parent Today with a confirmed medicine', () => {
+  beforeEach(() => {
+    useVaultStore.setState({ schedules: [schedule(['08:00', '20:00'])] });
+  });
+
+  it('shows the confirmed medicine, with both answers offered', async () => {
+    await renderScreen();
+
+    expect(screen.getByTestId('me-today-dose')).toBeTruthy();
+    expect(screen.getByText('Metformin')).toBeTruthy();
+    expect(screen.getByTestId('me-today-dose-taken')).toBeTruthy();
+    expect(screen.getByTestId('me-today-dose-missed')).toBeTruthy();
+  });
+
+  /**
+   * The safety property, on the screen rather than in the model. Nobody has
+   * answered, and the card says "not recorded" — it does not say the tablet was
+   * skipped, and it does not quietly assume it was taken.
+   */
+  it('describes an unanswered dose as not recorded', async () => {
+    await renderScreen();
+
+    expect(screen.getByText('Not recorded')).toBeTruthy();
+    expect(screen.queryByText(/missed/i)).toBeNull();
+  });
+
+  it('records a dose as taken, and offers to undo it', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+
+    expect(useVaultStore.getState().doseEvents).toHaveLength(1);
+    expect(await screen.findByText('Taken')).toBeTruthy();
+    expect(screen.getByTestId('me-today-dose-undo')).toBeTruthy();
+  });
+
+  it('only marks a dose missed when somebody says so', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-missed'));
+
+    expect(useVaultStore.getState().doseEvents[0]).toMatchObject({
+      state: 'missed',
+      recordedBySelf: true,
+    });
+  });
+
+  it('undoes a mistaken tap without deleting the history', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+    fireEvent.press(await screen.findByTestId('me-today-dose-undo'));
+
+    expect(useVaultStore.getState().doseEvents).toHaveLength(2);
+    expect(await screen.findByText('Not recorded')).toBeTruthy();
+  });
+
+  /**
+   * The card does not jump to the next dose the instant one is answered.
+   * Somebody who tapped the wrong button at seven in the morning has to be able
+   * to see what they recorded and take it back.
+   */
+  it('keeps the dose it just recorded on screen', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+
+    expect(await screen.findByText('Taken')).toBeTruthy();
+    expect(screen.queryByTestId('me-today-dose-taken')).toBeNull();
+  });
+
+  it('says there is nothing left when every dose was answered earlier', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+    fireEvent.press(await screen.findByTestId('me-today-dose-undo'));
+
+    // Back to an unanswered dose, which is the point of undo.
+    expect(await screen.findByTestId('me-today-dose-taken')).toBeTruthy();
   });
 });

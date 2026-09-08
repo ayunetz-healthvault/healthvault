@@ -21,6 +21,7 @@ import { AI_SUMMARY_DISCLAIMER } from '@/services/ai/summaryService';
 import { accountService } from '@/services/account/accountService';
 import {
   selectDocument,
+  selectLiveSchedules,
   selectParent,
   selectSummaryForDocument,
   useVaultSnapshot,
@@ -141,6 +142,16 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
     removeDocument(document.id);
     router.replace(`/parent/${document.parentId}`);
   };
+
+  /**
+   * Medicines already confirmed, so a row can say so instead of offering the
+   * same confirmation twice.
+   */
+  const scheduledNames = new Set(
+    selectLiveSchedules(vault, document.parentId).map((schedule) =>
+      schedule.name.trim().toLowerCase(),
+    ),
+  );
 
   const lowConfidence = summary !== undefined && summary.confidence < 0.7;
   const uncertainties = summary?.uncertainties ?? [];
@@ -293,6 +304,16 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                     <MedicineRow
                       key={medicine.id}
                       medicine={medicine}
+                      alreadyScheduled={scheduledNames.has(medicine.name.trim().toLowerCase())}
+                      onConfirmTaking={() =>
+                        router.push(
+                          `/treatment/new?patientId=${document.parentId}` +
+                            `&documentId=${document.id}` +
+                            `&name=${encodeURIComponent(medicine.name)}` +
+                            `&dosage=${encodeURIComponent(medicine.dosage)}` +
+                            `&frequency=${encodeURIComponent(medicine.frequency)}`,
+                        )
+                      }
                       testID={`medicine-${medicine.id}`}
                     />
                   ))}

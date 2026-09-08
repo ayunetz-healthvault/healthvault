@@ -5,6 +5,7 @@ import {
   Callout,
   Card,
   DocumentCard,
+  DoseCard,
   EmptyState,
   FollowUpCard,
   Screen,
@@ -12,13 +13,20 @@ import {
   Text,
 } from '@/components';
 import { useExperience } from '@/services/experience';
+import { recordDose, undoDose } from '@/services/treatment/occurrences';
+import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocumentTimeline,
+  selectDosesForDay,
   selectFollowUpsForParent,
+  selectLiveSchedules,
   selectParent,
   useVaultSnapshot,
+  useVaultStore,
 } from '@/state/vaultStore';
 import { spacing } from '@/theme';
+import type { DoseOccurrence, DoseState } from '@/types/treatment';
 import { calculateAge } from '@/utils/date';
 
 /** How many of each list the summary screen shows before "see all". */
@@ -37,6 +45,8 @@ export default function ParentHealthScreen(): React.JSX.Element {
   const router = useRouter();
   const { selfRecordId } = useExperience();
   const vault = useVaultSnapshot();
+  const appendDoseEvent = useVaultStore((state) => state.appendDoseEvent);
+  const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
 
   const record = selfRecordId === null ? undefined : selectParent(vault, selfRecordId);
 
@@ -58,6 +68,26 @@ export default function ParentHealthScreen(): React.JSX.Element {
     (item) => item.status === 'scheduled',
   );
   const age = calculateAge(record.dateOfBirth);
+
+  const schedules = selectLiveSchedules(vault, record.id);
+  const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
+  const doses = selectDosesForDay(vault, record.id, localDateIn(timezone));
+
+  const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
+    appendDoseEvent(
+      recordDose({
+        occurrence,
+        state,
+        recordedBy: userId,
+        // The patient's own screen, so this is their own confirmation.
+        recordedBySelf: true,
+      }),
+    );
+  };
+
+  const undoFor = (occurrence: DoseOccurrence): void => {
+    appendDoseEvent(undoDose(occurrence, userId, true));
+  };
 
   return (
     <Screen testID="me-health">
@@ -97,17 +127,70 @@ export default function ParentHealthScreen(): React.JSX.Element {
           ))
       )}
 
-      <SectionHeader title="Medicines" testID="me-health-medicines-header" />
-      <Callout
-        tone="neutral"
-        title="No confirmed medicines"
-        // The distinction this screen exists to hold: a medicine an AI read off
-        // a prescription is a reading of a document. A schedule is a commitment
-        // about what somebody takes and when. The first never becomes the
-        // second without a person confirming it.
-        message="A medicine written on a prescription is not the same as a schedule to follow. Confirming one, and recording each dose, is being built."
-        testID="me-health-medicines-notice"
+      <SectionHeader
+        title="Medicines"
+        actionLabel="Add"
+        onAction={() => router.push(`/treatment/new?patientId=${record.id}`)}
+        testID="me-health-medicines-header"
       />
+
+      {schedules.length === 0 ? (
+        <Callout
+          tone="neutral"
+          title="No confirmed medicines"
+          // The distinction this screen exists to hold: a medicine an AI read
+          // off a prescription is a reading of a document. A schedule is a
+          // statement about what somebody takes and when. The first never
+          // becomes the second without a person confirming it.
+          message="A medicine written on a prescription is not the same as a schedule to follow. Confirm one and it will appear here, with today’s doses."
+          testID="me-health-medicines-notice"
+        />
+      ) : (
+        <>
+          {schedules.map((schedule) => (
+            <Card key={schedule.id} tone="quiet" style={styles.medicine} testID={`me-health-medicine-${schedule.id}`}>
+              <Text variant="bodyStrong">{schedule.name}</Text>
+              <Text variant="callout" tone="secondary">
+                {[schedule.dosage, schedule.times.join(', ')].filter(Boolean).join(' · ')}
+              </Text>
+              <Text variant="caption" tone="muted">
+                {/*
+                  Says where it came from. "Confirmed on the 8th from a
+                  prescription" and "typed in by hand" are different degrees of
+                  evidence, and whoever reads this record later is entitled to
+                  know which one they are looking at.
+                */}
+                {schedule.provenance === 'from_document'
+                  ? 'Read from a document and confirmed by a person.'
+                  : 'Entered by hand.'}
+              </Text>
+            </Card>
+          ))}
+
+          <SectionHeader title="Today’s doses" testID="me-health-doses-header" />
+
+          {doses.length === 0 ? (
+            <Card tone="quiet" testID="me-health-doses-empty">
+              <Text variant="callout" tone="secondary">
+                Nothing is due today.
+              </Text>
+            </Card>
+          ) : (
+            doses.map((dose) => (
+              <DoseCard
+                key={dose.occurrenceKey}
+                occurrence={dose}
+                timezone={timezone}
+                bySelf
+                onTaken={() => recordFor(dose, 'taken')}
+                onMissed={() => recordFor(dose, 'missed')}
+                onUndo={() => undoFor(dose)}
+                testID={`me-health-dose-${dose.occurrenceKey}`}
+              />
+            ))
+          )}
+        </>
+      )}
 
       <SectionHeader title="Notes and symptoms" testID="me-health-notes-header" />
       <Callout
@@ -147,4 +230,5 @@ export default function ParentHealthScreen(): React.JSX.Element {
 
 const styles = StyleSheet.create({
   last: { marginBottom: spacing.xl },
+  medicine: { gap: spacing.xxs, marginBottom: spacing.sm },
 });

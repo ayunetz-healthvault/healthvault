@@ -38,6 +38,8 @@ export type IdPrefix =
   | 'mut'
   /** A recorded dose occurrence. */
   | 'dse'
+  /** A confirmed treatment schedule. Never minted from a document alone. */
+  | 'trt'
   /** A symptom or observation written by a person. */
   | 'obs';
 

@@ -129,6 +129,8 @@ const snapshot = (): VaultSnapshot => {
     documents: state.documents,
     summaries: state.summaries,
     followUps: state.followUps,
+    schedules: state.schedules,
+    doseEvents: state.doseEvents,
   };
 };
 

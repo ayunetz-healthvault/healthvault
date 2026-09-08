@@ -41,6 +41,8 @@ const snapshot = (patch: Partial<VaultSnapshot> = {}): VaultSnapshot => ({
   documents: [],
   summaries: [],
   followUps: [],
+  schedules: [],
+  doseEvents: [],
   ...patch,
 });
 

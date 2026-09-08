@@ -9,6 +9,7 @@ import {
   Callout,
   Card,
   DocumentCard,
+  DoseCard,
   EmptyState,
   FollowUpCard,
   ListRow,
@@ -17,13 +18,20 @@ import {
   Text,
 } from '@/components';
 import { useVaultRefresh } from '@/hooks/useVaultRefresh';
+import { recordDose, undoDose } from '@/services/treatment/occurrences';
+import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocumentTimeline,
+  selectDosesForDay,
   selectFollowUpsForParent,
+  selectLiveSchedules,
   selectParent,
   useVaultSnapshot,
+  useVaultStore,
 } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
+import type { DoseOccurrence, DoseState } from '@/types/treatment';
 import { RELATIONSHIP_LABELS } from '@/types/labels';
 import { calculateAge, formatDate } from '@/utils/date';
 import { pluralise } from '@/utils/format';
@@ -40,6 +48,8 @@ export default function ParentProfileScreen(): React.JSX.Element {
 
   const vault = useVaultSnapshot();
   const refresh = useVaultRefresh();
+  const appendDoseEvent = useVaultStore((state) => state.appendDoseEvent);
+  const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
 
   const parent = id ? selectParent(vault, id) : undefined;
 
@@ -56,6 +66,20 @@ export default function ParentProfileScreen(): React.JSX.Element {
       </Screen>
     );
   }
+
+  const schedules = selectLiveSchedules(vault, parent.id);
+  const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
+  const doses = selectDosesForDay(vault, parent.id, localDateIn(timezone));
+
+  const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
+    appendDoseEvent(
+      recordDose({ occurrence, state, recordedBy: userId, recordedBySelf: false }),
+    );
+  };
+
+  const undoFor = (occurrence: DoseOccurrence): void => {
+    appendDoseEvent(undoDose(occurrence, userId, false));
+  };
 
   const documents = selectDocumentTimeline(vault, parent.id);
   const followUps = selectFollowUpsForParent(vault, parent.id).filter(
@@ -107,6 +131,35 @@ export default function ParentProfileScreen(): React.JSX.Element {
           testID="parent-edit-button"
         />
       </View>
+
+      {doses.length === 0 ? null : (
+        <>
+          <SectionHeader
+            title="Today’s medicines"
+            subtitle={`${pluralise(doses.length, 'dose')} scheduled`}
+            testID="parent-doses-header"
+          />
+          {doses.map((dose) => (
+            <DoseCard
+              key={dose.occurrenceKey}
+              occurrence={dose}
+              timezone={timezone}
+              /*
+                A caregiver is not the patient. `bySelf={false}` makes the
+                action read "record as not taken" rather than "I haven't taken
+                it", and every event they write is labelled as a helper's — a
+                helper reporting what they believe is a weaker claim than the
+                person themselves saying it, and the record keeps them apart.
+              */
+              bySelf={false}
+              onTaken={() => recordFor(dose, 'taken')}
+              onMissed={() => recordFor(dose, 'missed')}
+              onUndo={() => undoFor(dose)}
+              testID={`parent-dose-${dose.occurrenceKey}`}
+            />
+          ))}
+        </>
+      )}
 
       <Card style={styles.detailsCard}>
         <ListRow

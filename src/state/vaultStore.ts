@@ -18,6 +18,8 @@ import type {
   ParentProfile,
   ProcessingStatus,
 } from '@/types/domain';
+import { occurrencesForDay } from '@/services/treatment/occurrences';
+import type { DoseEvent, DoseOccurrence, TreatmentSchedule } from '@/types/treatment';
 import { byCreatedAtDesc, byDueDateAsc, isOverdue, nowIso } from '@/utils/date';
 import { avatarColorFor } from '@/utils/format';
 import { createId } from '@/utils/id';
@@ -53,6 +55,27 @@ import { createId } from '@/utils/id';
  * payload, and translating it into profiles is the caller's job — the store
  * should not have to know what a `RemotePatient` looks like.
  */
+/**
+ * What somebody confirms when they say "yes, I am taking this".
+ *
+ * `times` and `confirmedBy` are required and have no defaults, because those
+ * two fields are the whole difference between a medicine a model read on a
+ * prescription and a medicine somebody is actually taking.
+ */
+export interface ScheduleConfirmation {
+  readonly patientId: string;
+  readonly name: string;
+  readonly dosage: string;
+  /** `HH:mm`, in `timezone`. Chosen by a person, never parsed from "twice a day". */
+  readonly times: string[];
+  readonly timezone: string;
+  readonly startDate: string;
+  readonly endDate: string | null;
+  /** The document this was read from, or null when it was typed in. */
+  readonly source: TreatmentSchedule['source'];
+  readonly confirmedBy: string;
+}
+
 export interface AppliedPull {
   readonly parents: ParentProfile[];
   readonly documentsByPatient: Record<string, MedicalDocument[]>;
@@ -66,6 +89,21 @@ interface VaultState {
   documents: MedicalDocument[];
   summaries: DocumentSummary[];
   followUps: FollowUp[];
+  /**
+   * Medicines somebody has confirmed they are taking.
+   *
+   * Never written by the summary pipeline. A medicine a model read off a
+   * prescription is a `MedicineMention`; it becomes a schedule only when a
+   * person confirms it, with times they chose — see `confirmSchedule`.
+   */
+  schedules: TreatmentSchedule[];
+  /**
+   * What happened to each dose. Append-only, including undo.
+   *
+   * "Did my mother take her tablet this morning" is a question about the
+   * record, and a record that can be quietly erased cannot answer it.
+   */
+  doseEvents: DoseEvent[];
   seeded: boolean;
 
   // --- Seed -----------------------------------------------------------------
@@ -105,6 +143,21 @@ interface VaultState {
   // --- Summaries ------------------------------------------------------------
   addSummary: (summary: DocumentSummary) => void;
 
+  // --- Treatment ------------------------------------------------------------
+  /**
+   * Turns a confirmed medicine into a schedule.
+   *
+   * Takes `confirmedBy` because there is no such thing as a schedule nobody
+   * confirmed: the argument is required so a caller cannot create one by
+   * omission. Supersedes any live schedule for the same medicine rather than
+   * editing it, so the previous instructions stay readable.
+   */
+  confirmSchedule: (draft: ScheduleConfirmation) => TreatmentSchedule;
+  /** Stops a schedule without deleting it. */
+  supersedeSchedule: (scheduleId: string) => void;
+  /** Records a dose event. Ignores null, which is what a no-op tap produces. */
+  appendDoseEvent: (event: DoseEvent | null) => void;
+
   // --- Sync -----------------------------------------------------------------
   /**
    * Applies what the server returned to what this device holds.
@@ -133,6 +186,8 @@ export const useVaultStore = create<VaultState>()(
       documents: [],
       summaries: [],
       followUps: [],
+      schedules: [],
+      doseEvents: [],
       seeded: false,
 
       seedDemoData: () => {
@@ -175,7 +230,15 @@ export const useVaultStore = create<VaultState>()(
       },
 
       clearAll: () =>
-        set({ parents: [], documents: [], summaries: [], followUps: [], seeded: true }),
+        set({
+          parents: [],
+          documents: [],
+          summaries: [],
+          followUps: [],
+          schedules: [],
+          doseEvents: [],
+          seeded: true,
+        }),
 
       // --- Parents ------------------------------------------------------------
       addParent: (draft) => {
@@ -311,6 +374,75 @@ export const useVaultStore = create<VaultState>()(
           };
         }),
 
+      confirmSchedule: (draft) => {
+        const timestamp = nowIso();
+
+        const schedule: TreatmentSchedule = {
+          id: createId('trt'),
+          patientId: draft.patientId,
+          name: draft.name,
+          dosage: draft.dosage,
+          times: [...draft.times].sort(),
+          timezone: draft.timezone,
+          startDate: draft.startDate,
+          endDate: draft.endDate,
+          provenance: draft.source === null ? 'manual' : 'from_document',
+          source: draft.source,
+          /**
+           * Both required by the type, and both come from the caller. There is
+           * no default here on purpose: a schedule nobody confirmed is a
+           * reading of a document, and this app must not turn one into
+           * reminders to take a drug.
+           */
+          confirmedBy: draft.confirmedBy,
+          confirmedAt: timestamp,
+          supersededAt: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({
+          schedules: [
+            /**
+             * A live schedule for the same medicine is superseded, not edited.
+             * Somebody whose dose changed from 500 mg to 250 mg has a history
+             * worth keeping — and the doses already recorded against the old
+             * schedule stay attached to what was actually being taken then.
+             */
+            ...state.schedules.map((existing) =>
+              existing.patientId === draft.patientId &&
+              existing.supersededAt === null &&
+              existing.name.trim().toLowerCase() === draft.name.trim().toLowerCase()
+                ? { ...existing, supersededAt: timestamp, updatedAt: timestamp }
+                : existing,
+            ),
+            schedule,
+          ],
+        }));
+
+        return schedule;
+      },
+
+      supersedeSchedule: (scheduleId) =>
+        set((state) => ({
+          schedules: state.schedules.map((schedule) =>
+            schedule.id === scheduleId && schedule.supersededAt === null
+              ? { ...schedule, supersededAt: nowIso(), updatedAt: nowIso() }
+              : schedule,
+          ),
+        })),
+
+      /**
+       * Null is accepted and ignored.
+       *
+       * `recordDose` returns null when the tap would change nothing — the same
+       * dose already in the same state. Handling that here means no screen has
+       * to remember to check, which is how a double tap becomes two entries for
+       * one tablet.
+       */
+      appendDoseEvent: (event) =>
+        set((state) => (event === null ? state : { doseEvents: [...state.doseEvents, event] })),
+
       addFollowUp: (draft) => {
         const timestamp = nowIso();
         const followUp: FollowUp = {
@@ -392,7 +524,15 @@ export const hydrateVaultForAccount = async (): Promise<void> => {
  * re-downloading every record. `forgetAccountLocally` is the destructive form.
  */
 export const closeVaultInMemory = (): void => {
-  useVaultStore.setState({ parents: [], documents: [], summaries: [], followUps: [], seeded: false });
+  useVaultStore.setState({
+    parents: [],
+    documents: [],
+    summaries: [],
+    followUps: [],
+    schedules: [],
+    doseEvents: [],
+    seeded: false,
+  });
 };
 
 // ---------------------------------------------------------------------------
@@ -407,6 +547,8 @@ export interface VaultSnapshot {
   documents: MedicalDocument[];
   summaries: DocumentSummary[];
   followUps: FollowUp[];
+  schedules: TreatmentSchedule[];
+  doseEvents: DoseEvent[];
 }
 
 /**
@@ -426,6 +568,8 @@ export const useVaultSnapshot = (): VaultSnapshot =>
       documents: state.documents,
       summaries: state.summaries,
       followUps: state.followUps,
+      schedules: state.schedules,
+      doseEvents: state.doseEvents,
     })),
   );
 
@@ -482,3 +626,49 @@ export const selectParentStats = (state: VaultSnapshot, parentId: string): Paren
     nextFollowUp: followUps[0],
   };
 };
+
+// ---------------------------------------------------------------------------
+// Treatment selectors
+//
+// The occurrence logic itself lives in `services/treatment/occurrences.ts` and
+// is pure; these only narrow the vault down to one person's records before
+// handing it over.
+// ---------------------------------------------------------------------------
+
+/** The schedules currently in force for one person. */
+export const selectLiveSchedules = (
+  state: VaultSnapshot,
+  patientId: string,
+): TreatmentSchedule[] =>
+  state.schedules.filter(
+    (schedule) => schedule.patientId === patientId && schedule.supersededAt === null,
+  );
+
+/**
+ * Every schedule for one person, superseded ones included.
+ *
+ * For the medicines list, which shows what somebody used to take as well as
+ * what they take now — a doctor asking "when did she stop the 500?" needs it.
+ */
+export const selectAllSchedules = (
+  state: VaultSnapshot,
+  patientId: string,
+): TreatmentSchedule[] => state.schedules.filter((schedule) => schedule.patientId === patientId);
+
+/**
+ * The doses due for one person on one local date.
+ *
+ * `localDate` is passed in rather than read from the clock so a screen renders
+ * the same thing in a test at any hour, and so the *patient's* date is used
+ * rather than the reader's — a daughter in Berlin opening this at 22:00 is
+ * looking at her mother's tomorrow.
+ */
+export const selectDosesForDay = (
+  state: VaultSnapshot,
+  patientId: string,
+  localDate: string,
+): DoseOccurrence[] =>
+  occurrencesForDay(selectLiveSchedules(state, patientId), doseEventsFor(state, patientId), localDate);
+
+const doseEventsFor = (state: VaultSnapshot, patientId: string): DoseEvent[] =>
+  state.doseEvents.filter((event) => event.patientId === patientId);
