@@ -56,6 +56,7 @@ const server = (
   documents: Record<string, unknown[]> = {},
   failing: Record<string, number> = {},
   summaries: Record<string, unknown> = {},
+  followUps: Record<string, unknown[]> = {},
 ): void => {
   fetchMock.mockImplementation(async (requested: string) => {
     const url = String(requested);
@@ -87,6 +88,17 @@ const server = (
         status: 200,
         headers: { get: () => null },
         text: async () => JSON.stringify({ summary: stored }),
+      };
+    }
+
+    const followUpMatch = /\/patients\/([^/]+)\/follow-ups$/.exec(url);
+    if (followUpMatch) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () =>
+          JSON.stringify({ followUps: followUps[followUpMatch[1] as string] ?? [] }),
       };
     }
 
@@ -431,5 +443,116 @@ describe('mapping a record onto the local shape', () => {
       notes: 'Prefers morning appointments',
       phone: '+91 90000 00000',
     });
+  });
+});
+
+/**
+ * The shared task list, coming down.
+ *
+ * A follow-up is the record that exists because somebody else has to act on it,
+ * and the pull did not fetch them at all: a task created on one phone appeared
+ * on no other, however long anybody waited. The endpoint had been there the
+ * whole time.
+ */
+describe('pulling the family’s follow-ups', () => {
+  const remoteFollowUp = (followUpId: string, overrides: Record<string, unknown> = {}) => ({
+    followUpId,
+    parentId: 'pat_1',
+    title: 'Eye clinic',
+    kind: 'doctor_visit',
+    dueDate: '2026-10-01',
+    dueTime: '10:30',
+    notes: 'Fasting not needed',
+    status: 'scheduled',
+    origin: 'manual',
+    sourceDocumentId: null,
+    doctorCategory: 'ophthalmologist',
+    calendarEventId: null,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    ...overrides,
+  });
+
+  it('brings back the tasks another person created', async () => {
+    server([patient('pat_1', 'Meera Nair')], {}, {}, {}, { pat_1: [remoteFollowUp('fup_1')] });
+
+    const pulled = await pullRecords([]);
+
+    expect(pulled.followUpsByPatient.pat_1).toEqual([
+      expect.objectContaining({
+        id: 'fup_1',
+        parentId: 'pat_1',
+        title: 'Eye clinic',
+        kind: 'doctor_visit',
+        dueTime: '10:30',
+        status: 'scheduled',
+      }),
+    ]);
+  });
+
+  it('carries a completed task across as completed', async () => {
+    server(
+      [patient('pat_1', 'Meera Nair')],
+      {},
+      {},
+      {},
+      { pat_1: [remoteFollowUp('fup_1', { status: 'completed' })] },
+    );
+
+    const pulled = await pullRecords([]);
+
+    expect(pulled.followUpsByPatient.pat_1?.[0]?.status).toBe('completed');
+  });
+
+  /**
+   * A status this app has no label for must never be read as done. Somebody
+   * would see a tick against an appointment nobody has been to.
+   */
+  it('reads a status it does not recognise as still scheduled', async () => {
+    server(
+      [patient('pat_1', 'Meera Nair')],
+      {},
+      {},
+      {},
+      { pat_1: [remoteFollowUp('fup_1', { status: 'rescheduled_by_clinic' })] },
+    );
+
+    const pulled = await pullRecords([]);
+
+    expect(pulled.followUpsByPatient.pat_1?.[0]?.status).toBe('scheduled');
+  });
+
+  it('reads a kind it does not recognise as other', async () => {
+    server(
+      [patient('pat_1', 'Meera Nair')],
+      {},
+      {},
+      {},
+      { pat_1: [remoteFollowUp('fup_1', { kind: 'dialysis' })] },
+    );
+
+    expect((await pullRecords([])).followUpsByPatient.pat_1?.[0]?.kind).toBe('other');
+  });
+
+  /**
+   * A record that went away mid-pull takes its tasks with it, and leaves
+   * nothing half-pulled behind — a patient whose documents arrived and whose
+   * follow-ups did not is a partial view of a record this account can no longer
+   * reach.
+   */
+  it('drops a record that became unreachable while it was being read', async () => {
+    server(
+      [patient('pat_1', 'Meera Nair'), patient('pat_2', 'Ravi Nair')],
+      { pat_1: [], pat_2: [] },
+      { pat_2: 404 },
+      {},
+      { pat_1: [remoteFollowUp('fup_1')] },
+    );
+
+    const pulled = await pullRecords(['pat_1', 'pat_2']);
+
+    expect(pulled.followUpsByPatient.pat_2).toBeUndefined();
+    expect(pulled.documentsByPatient.pat_2).toBeUndefined();
+    expect(pulled.removedPatientIds).toEqual(['pat_2']);
   });
 });

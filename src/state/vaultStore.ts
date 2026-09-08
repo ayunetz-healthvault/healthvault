@@ -8,6 +8,7 @@ import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
 import { activeVaultStorage } from '@/services/storage/activeVault';
 import { mergeDocuments } from '@/services/sync/mergeDocuments';
+import { mergeFollowUps } from '@/services/sync/mergeFollowUps';
 import type {
   DocumentSummary,
   SummaryCorrection,
@@ -103,6 +104,16 @@ export interface AppliedPull {
   readonly documentsByPatient: Record<string, MedicalDocument[]>;
   /** Keyed by the server's document id. */
   readonly summaries: Record<string, DocumentSummary>;
+  /** The shared task list, keyed by patient. */
+  readonly followUpsByPatient: Record<string, FollowUp[]>;
+  /**
+   * Follow-ups with a change still queued on this device.
+   *
+   * The pull must not overwrite those: the outbox is holding the only copy of
+   * what somebody just did, and the server's row is the state before they did
+   * it. See `mergeFollowUps`.
+   */
+  readonly pendingFollowUpIds: readonly string[];
   readonly removedPatientIds: string[];
 }
 
@@ -394,7 +405,14 @@ export const useVaultStore = create<VaultState>()(
         })),
 
       // --- Follow-ups ---------------------------------------------------------
-      applyPulledRecords: ({ parents, documentsByPatient, summaries, removedPatientIds }) =>
+      applyPulledRecords: ({
+        parents,
+        documentsByPatient,
+        summaries,
+        followUpsByPatient,
+        pendingFollowUpIds,
+        removedPatientIds,
+      }) =>
         set((state) => {
           const removed = new Set(removedPatientIds);
 
@@ -444,7 +462,12 @@ export const useVaultStore = create<VaultState>()(
               ),
               ...pulledSummaries,
             ],
-            followUps: state.followUps.filter((followUp) => !removed.has(followUp.parentId)),
+            followUps: mergeFollowUps({
+              local: state.followUps,
+              remoteByPatient: followUpsByPatient,
+              removedPatientIds,
+              pendingIds: pendingFollowUpIds,
+            }),
           };
         }),
 

@@ -4,7 +4,14 @@ import { ApiError } from '@/services/api/errors';
 import { toDocumentSummary } from '@/services/processing/summaryMapper';
 import type { ProcessDocumentResponse } from '@/services/processing/types';
 import type { GrantRole } from '@/types/access';
-import type { DocumentSummary, MedicalDocument, ParentProfile } from '@/types/domain';
+import type {
+  DocumentSummary,
+  FollowUp,
+  FollowUpKind,
+  FollowUpStatus,
+  MedicalDocument,
+  ParentProfile,
+} from '@/types/domain';
 
 /**
  * Reading the shared record back.
@@ -45,6 +52,15 @@ export interface PulledRecords {
    * nothing to show and no explanation.
    */
   readonly summariesByDocumentId: Record<string, DocumentSummary>;
+  /**
+   * The shared task list, keyed by patient.
+   *
+   * Follow-ups are pulled and not merely pushed, because they are the one
+   * record whose entire point is that somebody else acts on it. Sending them
+   * and never fetching them meant a task created on one phone existed nowhere
+   * else — the endpoint was there, and nothing ever called it.
+   */
+  readonly followUpsByPatient: Record<string, FollowUp[]>;
   /** Patients that were cached and are no longer reachable. */
   readonly removedPatientIds: string[];
 }
@@ -89,6 +105,22 @@ interface RemoteDocument {
     readonly failureCode?: string | undefined;
   } | null;
   readonly hasSummary?: boolean;
+}
+
+interface RemoteFollowUp {
+  readonly followUpId: string;
+  readonly parentId: string;
+  readonly title: string;
+  readonly kind?: string | undefined;
+  readonly dueDate: string;
+  readonly dueTime?: string | null | undefined;
+  readonly notes?: string | undefined;
+  readonly status: string;
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly doctorCategory?: string | null | undefined;
+  readonly calendarEventId?: string | null | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
 }
 
 interface RemoteSummary {
@@ -201,6 +233,51 @@ const toDocument = (remote: RemoteDocument): MedicalDocument => {
   };
 };
 
+const FOLLOW_UP_KINDS: readonly FollowUpKind[] = [
+  'doctor_visit',
+  'lab_test',
+  'medicine_refill',
+  'vaccination',
+  'physiotherapy',
+  'other',
+];
+
+const FOLLOW_UP_STATUSES: readonly FollowUpStatus[] = [
+  'scheduled',
+  'completed',
+  'missed',
+  'cancelled',
+];
+
+/**
+ * Maps a server follow-up onto the shape the screens already use.
+ *
+ * The two enums are checked rather than cast. A server that grew a new kind of
+ * task would otherwise put a value the app has no label for straight into a
+ * list somebody reads, and "other" is a truthful answer where an unrecognised
+ * string is a rendering bug. The status falls back to `scheduled` for the same
+ * reason and with more at stake: an unknown status must never be read as done.
+ */
+const toFollowUp = (remote: RemoteFollowUp): FollowUp => ({
+  id: remote.followUpId,
+  parentId: remote.parentId,
+  title: remote.title,
+  kind: FOLLOW_UP_KINDS.includes(remote.kind as FollowUpKind)
+    ? (remote.kind as FollowUpKind)
+    : 'other',
+  dueDate: remote.dueDate,
+  dueTime: remote.dueTime ?? null,
+  notes: remote.notes ?? '',
+  status: FOLLOW_UP_STATUSES.includes(remote.status as FollowUpStatus)
+    ? (remote.status as FollowUpStatus)
+    : 'scheduled',
+  sourceDocumentId: remote.sourceDocumentId ?? null,
+  doctorCategory: (remote.doctorCategory ?? null) as FollowUp['doctorCategory'],
+  calendarEventId: remote.calendarEventId ?? null,
+  createdAt: remote.createdAt,
+  updatedAt: remote.updatedAt,
+});
+
 /** Maps a server patient onto the local profile shape. */
 export const toParentProfile = (
   remote: RemotePatient,
@@ -248,6 +325,7 @@ export const pullRecords = async (
   const reachable = new Set(patients.map((entry) => entry.patient.patientId));
   const documentsByPatient: Record<string, MedicalDocument[]> = {};
   const summariesByDocumentId: Record<string, DocumentSummary> = {};
+  const followUpsByPatient: Record<string, FollowUp[]> = {};
 
   for (const { patient } of patients) {
     try {
@@ -256,6 +334,19 @@ export const pullRecords = async (
       );
       const mapped = documents.map(toDocument);
       documentsByPatient[patient.patientId] = mapped;
+
+      /**
+       * Fetched in the same pass as the documents, and under the same
+       * try/catch: a record whose grant was withdrawn between the list call and
+       * this one drops out of the pull entirely rather than arriving with its
+       * documents and no tasks.
+       */
+      const { followUps } = await apiClient.get<{ followUps?: RemoteFollowUp[] }>(
+        endpoints.followUps.list(patient.patientId),
+      );
+      // An older server that does not send the field is read as "no tasks",
+      // not as a crash mid-pull that would lose the documents fetched above.
+      followUpsByPatient[patient.patientId] = (followUps ?? []).map(toFollowUp);
 
       for (const document of mapped) {
         if (document.status !== 'ready' || alreadyHeld.has(document.id)) continue;
@@ -274,6 +365,15 @@ export const pullRecords = async (
        */
       if (error instanceof ApiError && (error.kind === 'not_found' || error.kind === 'forbidden')) {
         reachable.delete(patient.patientId);
+        /**
+         * Nothing half-pulled is kept for a record that went away mid-pull.
+         *
+         * Its documents may already be in the map from the call that succeeded,
+         * and leaving them there would apply a partial view of a record this
+         * account can no longer reach.
+         */
+        delete documentsByPatient[patient.patientId];
+        delete followUpsByPatient[patient.patientId];
         continue;
       }
       throw error;
@@ -284,6 +384,7 @@ export const pullRecords = async (
     patients: patients.filter((entry) => reachable.has(entry.patient.patientId)),
     documentsByPatient,
     summariesByDocumentId,
+    followUpsByPatient,
     removedPatientIds: cachedPatientIds.filter((id) => !reachable.has(id)),
   };
 };

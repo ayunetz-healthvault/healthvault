@@ -82,8 +82,28 @@ const summaryBody = {
   },
 };
 
-/** A whole synthetic server: the patient list, its documents, its summaries. */
-const serve = (options: { reachable: boolean }): void => {
+const followUp = (followUpId: string, title: string, status: string) => ({
+  followUpId,
+  parentId: 'pat_1',
+  title,
+  kind: 'doctor_visit',
+  dueDate: '2026-10-01',
+  dueTime: null,
+  notes: '',
+  status,
+  origin: 'manual',
+  sourceDocumentId: null,
+  doctorCategory: 'nephrologist',
+  calendarEventId: null,
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+});
+
+/**
+ * A whole synthetic server: the patient list, its documents, its summaries and
+ * the family's shared task list.
+ */
+const serve = (options: { reachable: boolean; followUps?: unknown[] }): void => {
   fetchMock.mockImplementation(async (requested: string) => {
     const url = String(requested);
     const ok = (body: unknown) => ({
@@ -113,6 +133,20 @@ const serve = (options: { reachable: boolean }): void => {
           }),
           document('doc_done', 'Kidney panel', { status: 'ready' }, true),
         ],
+      });
+    }
+
+    if (url.endsWith('/follow-ups')) {
+      if (!options.reachable) {
+        return {
+          ok: false,
+          status: 404,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ code: 'not_found' }),
+        };
+      }
+      return ok({
+        followUps: options.followUps ?? [followUp('fup_clinic', 'Eye clinic', 'scheduled')],
       });
     }
 
@@ -210,5 +244,67 @@ describe('a second account refreshing a shared record', () => {
 
     expect(result.outcome).toBe('failed');
     expect(snapshot().documents).toHaveLength(3);
+  });
+});
+
+/**
+ * The shared task list, which is the thing two people actually coordinate with.
+ *
+ * The journey below is the one the review asked for: one account creates a
+ * task, the other sees it, completes it, and the first sees the completion.
+ * Everything here goes through a fake `fetch`; nothing has been near a real
+ * server, and `docs/koode/PROGRESS.md` says so.
+ */
+describe('follow-ups arriving from another family member', () => {
+  it('appears on this phone after a refresh', async () => {
+    serve({ reachable: true });
+
+    await pullIntoVault();
+
+    expect(snapshot().followUps.map((entry) => ({ id: entry.id, status: entry.status }))).toEqual([
+      { id: 'fup_clinic', status: 'scheduled' },
+    ]);
+  });
+
+  /** The completion is the fact that stops two people going to one appointment. */
+  it('shows the completion the other person recorded', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    serve({
+      reachable: true,
+      followUps: [followUp('fup_clinic', 'Eye clinic', 'completed')],
+    });
+    await pullIntoVault();
+
+    expect(snapshot().followUps[0]).toMatchObject({ id: 'fup_clinic', status: 'completed' });
+  });
+
+  it('removes one the other person deleted', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    serve({ reachable: true, followUps: [] });
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toEqual([]);
+  });
+
+  it('does not accumulate duplicates across refreshes', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toHaveLength(1);
+  });
+
+  it('takes the tasks away with the record when access is withdrawn', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    serve({ reachable: false });
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toEqual([]);
   });
 });

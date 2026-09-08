@@ -1,3 +1,4 @@
+import { currentSyncService } from './pushService';
 import { pullRecords, toParentProfile } from './reconcile';
 
 import { isBackendEnabled } from '@/config/env';
@@ -21,6 +22,20 @@ export type PullOutcome =
   /** Offline, or the server said no. The cached records are untouched. */
   | { readonly outcome: 'failed'; readonly error: unknown };
 
+/** The follow-ups this device has changes queued for, or none if it cannot say. */
+const pendingFollowUps = async (): Promise<string[]> => {
+  const service = currentSyncService();
+  if (service === null) return [];
+
+  try {
+    return (await service.outbox.all())
+      .filter((mutation) => mutation.entity === 'follow_up')
+      .map((mutation) => mutation.entityId);
+  } catch {
+    return [];
+  }
+};
+
 export const pullIntoVault = async (): Promise<PullOutcome> => {
   if (!isBackendEnabled()) return { outcome: 'no_backend' };
 
@@ -40,6 +55,19 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
       },
     );
 
+    /**
+     * What this device is still holding, asked of the outbox rather than
+     * guessed.
+     *
+     * A follow-up with a queued change must survive the pull unchanged — the
+     * queue has the only copy of what somebody just did, and applying the
+     * server's row over it would silently undo a completed appointment while
+     * its request was still waiting to be sent. An unreadable queue yields an
+     * empty list, which means the pull is authoritative: that is the wrong way
+     * round for exactly one refresh, and the alternative is refusing to sync.
+     */
+    const pendingFollowUpIds = await pendingFollowUps();
+
     const existingById = new Map(before.parents.map((parent) => [parent.id, parent]));
     const parents: ParentProfile[] = pulled.patients.map(({ patient }) =>
       toParentProfile(patient, existingById.get(patient.patientId)),
@@ -49,6 +77,8 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
       parents,
       documentsByPatient: pulled.documentsByPatient,
       summaries: pulled.summariesByDocumentId,
+      followUpsByPatient: pulled.followUpsByPatient,
+      pendingFollowUpIds,
       removedPatientIds: pulled.removedPatientIds,
     });
 
