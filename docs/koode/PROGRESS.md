@@ -11,22 +11,22 @@ never hidden by closing the parent story.
 
 | Story | Status | Evidence / blocker |
 | --- | --- | --- |
-| KOO-00 | Implemented locally | Baseline reconciled against `ecb38d2`; see below |
-| KOO-01 | Implemented locally | Both shells built and captured; native device checks open |
-| KOO-02 | Implemented locally | Cognito wired and tested against a faked provider; live pool unverified |
-| KOO-03 | In progress | Model, policy, routes and migration done and tested; `/v1/parents` and `/v1/documents` not yet moved; DynamoDB semantics unrun here |
-| KOO-04 | Not started | |
-| KOO-05 | Not started | |
-| KOO-06 | Not started | |
-| KOO-07 | Not started | |
-| KOO-08 | Not started | |
-| KOO-09 | Not started | |
-| KOO-10 | Not started | |
-| KOO-11 | Not started | |
-| KOO-12 | Not started | |
-| KOO-13 | Not started | |
-| KOO-14 | Not started | Cloud execution/credentials must be verified in implementing session |
-| KOO-15 | Not started | |
+| KOO-00 | Verified | Baseline reconciled against `ecb38d2`; both gates re-run |
+| KOO-01 | Implemented locally | Both shells built; 24 web captures; **native device checks open** |
+| KOO-02 | Implemented locally | Cognito wired and tested against a faked provider; **live pool unverified** |
+| KOO-03 | Implemented locally | Model, policy, routes, invitations, migration; **DynamoDB semantics unrun here** |
+| KOO-04 | Implemented locally | Encrypted per-account vault, protected originals; **device checks open** |
+| KOO-05 | Implemented locally | Outbox, classification, pull with tombstones, honest status line |
+| KOO-06 | Implemented locally | Real create/presign/PUT/complete with resume; **local-stack protocol test unrun** |
+| KOO-07 | Implemented locally | Worker, leases, idempotency, DLQ, double grant/consent check |
+| KOO-08 | Partly implemented | Backend review/corrections/versioning done; **native review screen not rebuilt** |
+| KOO-09 | Partly implemented | Family overview reads real roles and pulled records; attention rules tested |
+| KOO-10 | Partly implemented | Schedule/dose model and safety rules done; **Today screen not yet wired to it** |
+| KOO-11 | Partly implemented | Observation model and visit assembly done; **entry screens not built** |
+| KOO-12 | Partly implemented | Per-device calendar mappings and content minimisation done; **follow-up CRUD not moved to `/v1`** |
+| KOO-13 | Partly implemented | Consent model enforced in the worker; DATA_HANDLING.md; **export/deletion endpoints not built** |
+| KOO-14 | Blocked | Startup safety guard implemented and tested; **every cloud step needs an account this session has none of** |
+| KOO-15 | Partly satisfied | Both gates run and recorded below; **no device, no cloud, no live provider journey** |
 
 ## Environment limitations in this session
 
@@ -313,9 +313,207 @@ and **were not run**: the Docker image registry is unreachable in this session,
 so the local stack cannot start. They are written and unrun, and the conditional
 writes they cover are the one part of this story a fake cannot demonstrate.
 
-### Next precise action
+### Outcome
 
-KOO-03d: move `/v1/parents` and `/v1/documents` onto patient partitions behind
-`requireAccess`, then build the sharing screens — named helpers, exact
-permissions, pending invitations, revocation — replacing the "not built yet"
-notices now on `app/care/family.tsx` and `app/me/family.tsx`.
+Done and committed as `22e1b11` and `06c947d`. `/v1/parents` was removed rather
+than kept alongside `/v1/patients` — two live layouts for the same thing is how
+one of them gets forgotten. Object keys moved from `owners/<accountId>/` to
+`patients/<patientId>/` so revoking a helper moves no bytes and deleting a
+record is one prefix.
+
+The sharing screens are built. `app/me/family.tsx` names helpers, states each
+one's permissions in plain words, issues an invitation whose token is shown
+once, and states what revocation does *not* reach.
+
+## KOO-04 — Encrypt and isolate records and original files on the phone
+
+**Status: Implemented locally.** Commit `94d4663`. ADR-006.
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Encrypted store, maintained implementation, compatible with the Expo build; SecureStore holds keys not payloads | Satisfied | `vaultCrypto.ts` (XChaCha20-Poly1305, `@noble/ciphers`); 17 tests including a wrong key failing rather than returning plausible data |
+| Originals protected separately; pending ones out of evictable cache | Satisfied | `protectedFiles.ts`; 12 tests. ADR-006 § 5 states plainly that the record key does **not** cover these files |
+| Everything partitioned by account; switching, sign-out and wipe expose nothing | Satisfied | `accountSwitch.test.ts`, 11 tests |
+| Migration verifies encrypted write/read before removing plaintext | Satisfied | 7 migration tests, including a write that reports success and stores nothing |
+| Backup inclusion/exclusion and restore behaviour; lost keys give an explicit recovery flow | Partly | `describeKeyLoss()` is asserted not to say "your records are lost"; **backup exclusion is unverified on a device** |
+| App lock honoured, and not described as encryption | Satisfied | New callout on `app/settings/security.tsx` |
+| Unuploaded originals survive restart; cleanup only after confirmed upload; bounded without silent deletion | Satisfied | Over the limit, capture refuses and says why — pending work is never evicted |
+
+**Defects found by writing the tests.** Two ordering bugs, both of which deleted
+data and both of which read as correct: sign-out cleared the store while the
+storage was still attached, so the persist middleware saved an empty vault over
+the account's records; and hydration cleared before rehydrating, writing an
+empty vault and then reading back what it had just written. The second only
+appeared to work because the write and the read raced.
+
+**Open:** keychain backing on real hardware, backup exclusion, Data Protection
+while locked. Expo Go is not evidence for any of these.
+
+## KOO-05 — Synchronize shared records with honest offline states
+
+**Status: Implemented locally.** Commits `96441d9`, `06c947d`.
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Reconcile with the backend; local writes alone do not update the shared record | Satisfied | `reconcile.ts` pulls; `outbox.ts` pushes; 9 + 40 tests |
+| Durable encrypted outbox, mutation ids, versions, bounded retries, backoff; a timeout after commit does not duplicate | Satisfied | The id is generated once and reused on every retry — asserted directly |
+| Saved locally / syncing / synced / failed / conflict distinguished; last sync shown | Satisfied | `SyncStatus`, 8 tests; the time only advances when something was acknowledged |
+| Tombstones so deletions are not resurrected | Satisfied | A record the server no longer returns is removed; `removedPatientIds` |
+| Stale writes rejected after revocation; inaccessible records cleared | Satisfied | 401/403/404 → `rejected`, never retried, never silently dropped |
+| Conflicts surfaced, not overwritten by a device clock | Satisfied | 409 → `conflict`, stops, needs a person |
+| Explicit retry controls; demo storage separate from live | Satisfied | `retryNow` keeps the attempt history so a hopeless change cannot be retried forever one tap at a time |
+
+## KOO-06 — Connect durable document capture to the existing upload API
+
+**Status: Implemented locally.** Commit `04502db`.
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Reuse capture/gallery/PDF; confirm patient, date, category; consistent limits | Satisfied | `MAX_PAGES` states where the number comes from |
+| create → presign → PUT → complete; server ids tracked, not local ones | Satisfied | 17 tests; a resumed upload does not create the document twice |
+| Progress and bytes persisted; expired URLs renewed; resume without duplicates | Satisfied | URLs are requested during the upload and deliberately never persisted |
+| Content type, page bounds, exact page set validated | Partly | Client-side bounds and type; **byte-level sniffing is the backend's `FileValidator`, unchanged and unrun against the stack here** |
+| Recoverable dispatch; a claimed key followed by queue failure leaves no stuck document | Satisfied | Completion is idempotent on the processing state itself |
+| Awaiting upload / uploading / queued / failed exposed separately | Satisfied | Session state plus processing status |
+| Grants enforced for URL issuance and completion; no identifiers in object names or logs | Satisfied | `requireAccess` before signing; keys carry no name or filename |
+
+**Removed rather than kept:** the demo build's simulated transfer. A progress
+bar reaching 100% having sent nothing is exactly the detail somebody
+demonstrates the app with and then believes.
+
+## KOO-07 — Process queued reports and persist validated AI summaries
+
+**Status: Implemented locally.** Commit `4d61092`.
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Queue consumer using the existing adapters and orchestrator; stage and failure persisted | Satisfied | `DocumentWorker.ts`, `npm run worker`; 24 tests |
+| Leases, idempotent processing, bounded retries, DLQ | Satisfied | The duplicate check asks the record, not a delivery log — the record is what survives a crash |
+| Record, grant and consent rechecked at execution **and before commit** | Satisfied | Both checks tested, including withdrawal mid-run |
+| Pipeline preserved; originals and identifiers never sent to the LLM | Satisfied | Orchestrator untouched |
+| Low confidence / unreadable surfaced as review-needed, not guessed | Satisfied | `ocr_failed` → `manual_review`, not retried |
+| Sarvam compatibility verified against docs, then a live synthetic call | **Blocked** | No credential. `SarvamSummaryProvider` still says its real behaviour is unverified |
+| Temporary derived files cleaned on success and failure | Satisfied | `finally`, asserted both ways |
+
+## KOO-08 — Review the original beside AI output and preserve corrections
+
+**Status: Partly implemented.** Commit `e8c5f17` (backend).
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Authorised viewing of every original page | Satisfied (API) | Short-lived read URLs, shorter than upload URLs |
+| Original / AI draft / correction / reviewed kept separate | Satisfied | The pipeline's output is written once and never edited |
+| Corrections with actor, time and version history | Satisfied | Append-only; changing your mind is another entry |
+| A new version invalidates review; concurrent edits conflict | Satisfied | 409 on a stale version, for both correction and review |
+| Unclear values stay unknown with visible warnings | Partly | Uncertainties are carried into visit preparation; **the review screen is not rebuilt** |
+| Follow-ups stay proposals; creating a task needs separate confirmation | Partly | Model enforces it; **the confirm-to-create UI is not built** |
+
+**Not done:** the native review screen. The API is complete and tested; the
+screen that puts the original beside the draft is the next slice.
+
+## KOO-09 to KOO-12 — the two journeys
+
+**Status: Partly implemented.** Commits `06c947d`, `253f378`, `e22041e`,
+`1f03a15`.
+
+What is done is the part that is hard to get right and easy to get wrong: the
+rules, as pure tested functions.
+
+- **KOO-09.** `attention.ts` decides what "needs attention" may mean —
+  administrative facts only, never the absence of one. The caregiver home and
+  family screens read real roles and pulled records.
+- **KOO-10.** `occurrences.ts`, 25 tests. A dose with nothing recorded is
+  `null`, never "missed". Two taps on one tablet make one event. Undo appends
+  and is marked, so "corrected to missed" stays distinguishable from "that was
+  undone". Times resolve in the patient's zone across a daylight-saving change.
+- **KOO-11.** `visitPreparation.ts`, 14 tests. Observations kept in the person's
+  own words with no severity scale; uncertainties carried forward rather than
+  dropped for a cleaner summary; a helper's note attributed as a helper's.
+- **KOO-12.** Per-device calendar mappings, and calendar entries that no longer
+  carry the record. Three existing tests asserted the old behaviour and were
+  replaced with the reason recorded beside them.
+
+**Not done:** the screens that use them. The parent's Today screen still renders
+the no-treatment state rather than reading `occurrences.ts`; observation entry,
+visit preparation and follow-up CRUD over `/v1` are not built.
+
+## KOO-13 — Privacy choices, export and deletion
+
+**Status: Partly implemented.** Commit `bcb9343`. `DATA_HANDLING.md`.
+
+Consent is three independent records with the notice version pinned, enforced in
+the worker before the provider call and again before the result is written. A
+missing answer is not permission. `DATA_HANDLING.md` records retention, the
+difference between leaving a family and deleting a record, and what deletion
+cannot reach.
+
+**Not done:** the export and deletion endpoints, and the consent store itself —
+`consentFor` is wired explicitly and returns nothing, which means not permitted,
+which is the safe direction to be incomplete in.
+
+## KOO-14 — Controlled cloud environment and operational recovery
+
+**Status: Blocked.** Commit `9f9fde5`. `DEPLOYMENT.md`.
+
+The startup guard is implemented and tested: production with no provider key,
+production against the local stack, and production at debug logging all refuse
+to boot. `DEPLOYMENT.md` picks CDK over SAM with the reason, lists what must
+exist, what must not ship, the content-free signals worth alarming on, and
+runbooks.
+
+**Every cloud step is blocked** on an account and authorisation this session
+does not have. None is marked complete.
+
+## KOO-15 — Demonstrate both journeys and record the release decision
+
+**Status: Partly satisfied.**
+
+### Gates actually run, at the end of this work
+
+| Command | Result |
+| --- | --- |
+| `npm run verify` | **pass** — typecheck, lint, **705 tests / 43 suites** (371 at baseline) |
+| `SKIP_OCR_TESTS=1 npm run backend:verify` | **pass** — **523 passed, 92 skipped** (410/79 at baseline) |
+| `npm run backend:verify` (no skip) | **fail** — the same 6 `tesseractOcr` network fetches as at baseline, unchanged and environmental |
+
+### What the 92 skipped backend tests are
+
+Not incidental. They include every test that needs the local stack: the
+`/v1` API end to end, the record repository's isolation tests, the ADR-005
+concurrency and migration tests, and PDF processing. **The Docker image
+registry is unreachable in this session, so the stack cannot start.** These
+tests are written and unrun, and the conditional writes they cover are the one
+part of KOO-03 a fake cannot demonstrate.
+
+### Readiness
+
+| Level | State |
+| --- | --- |
+| **Demo ready** | Yes, for the two shells and the design. The demonstration build seeds fictional records, cannot reach a server, and says so above the fold |
+| **Synthetic cloud pilot ready** | **No.** Requires the local stack and then a cloud environment; neither has been exercised |
+| **Real-patient pilot approved** | **No.** Requires everything above plus the privacy, provider, legal and operational gates in `DATA_HANDLING.md`, none of which is closed |
+
+### Journeys, honestly
+
+Neither end-to-end journey has been run. The pieces are implemented and unit
+tested; what has *not* happened is a single document travelling from a camera
+through upload, a worker, a provider and back to a second account's screen.
+That needs the local stack at minimum, and no amount of passing unit tests
+substitutes for it.
+
+## Resume checkpoint
+
+Next, in order:
+
+1. **Get the local stack running** in an environment with an image registry, and
+   run the four skipped integration suites. They are the highest-value unrun
+   evidence in the repository.
+2. **Wire the parent's Today screen** to `occurrences.ts`, and build the dose
+   controls. The rules are done and tested; the screen is not.
+3. **Rebuild the document review screen** against the correction API.
+4. **Build observation entry and visit preparation screens** over
+   `visitPreparation.ts`.
+5. **Move follow-up CRUD to `/v1`** and wire the calendar mappings into the
+   confirmation flow.
+6. **Build the consent store and the export/deletion endpoints.**
+7. Everything in `DEPLOYMENT.md` § "What is blocked", once there is an account.

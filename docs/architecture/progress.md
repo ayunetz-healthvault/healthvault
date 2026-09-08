@@ -32,6 +32,8 @@ the intent and do not change as work lands. This file is the record.
 | P2-03a  | Identity port and local issuer            | Done — 2026-08-19                |
 | P2-05a  | The /v1 API: parents, documents, uploads  | Done — 2026-08-19                |
 | Phase 2 | Cloud platform                            | Building locally — see ADR-003   |
+| P2-05   | Processing worker                         | Done — 2026-09-08, as KOO-07     |
+| Koode   | KOO-00..15 (docs/koode)                   | In progress — see docs/koode/PROGRESS.md |
 
 Phase 1 remains **synthetic data only**. No step below has changed that.
 
@@ -1984,3 +1986,38 @@ confirm the shared-queue fix holds. Frontend untouched at 371.
   has never called `/v1`.
 - `fastify-plugin` was added and then removed when authentication became
   synchronous.
+
+
+## Koode — KOO-00 to KOO-15
+
+**8 September 2026.** A separate backlog, in `docs/koode/`, adding a shared
+family record and an individual parent experience. It supplements this plan
+rather than replacing it, and it does not mark anything here complete.
+
+Where the two overlap:
+
+- **P2-05, the processing worker, is done** — implemented as KOO-07. A document
+  no longer reaches `queued` and stays there. `npm run worker` runs it.
+- **§ 4's key schema has a third documented divergence.** Clinical items moved
+  from `USER#<ownerId>` to `PATIENT#<patientId>` partitions, with access as an
+  explicit grant. See ADR-005; the migration is additive and deletes nothing.
+- **Object keys moved** from `owners/<accountId>/` to `patients/<patientId>/`
+  for the same reason.
+- **`/v1/parents` is removed**, replaced by `/v1/patients`. Document routes now
+  name the patient in the path and check a grant before reading, writing or
+  signing.
+- **Textract remains a phase-2 option.** Tesseract is unchanged. Nothing in
+  this work is an OCR migration.
+
+Three new ADRs: 004 (mobile authentication against Cognito), 005 (patient
+identity and per-record access grants), 006 (on-device record encryption).
+
+Test counts at the end of that work: frontend **705** (was 371), backend **523
+passed with 92 skipped** under `SKIP_OCR_TESTS=1` (was 410/79). The skipped
+count grew because the new integration tests for ADR-005 need the local stack,
+which could not start in that session — the image registry was unreachable.
+They are written and unrun.
+
+Evidence, limitations and the resume checkpoint are in
+`docs/koode/PROGRESS.md`. Nothing there is recorded as verified that was not
+actually run.
