@@ -8,7 +8,7 @@ import {
 } from '@aws-sdk/client-dynamodb';
 
 import type { StackConfig } from '../../config/stack.js';
-import { GSI1_NAME } from './keys.js';
+import { GSI1_NAME, GSI2_NAME } from './keys.js';
 
 /**
  * The table, as code.
@@ -29,6 +29,8 @@ export const tableDefinition = (tableName: string): CreateTableCommandInput => (
     { AttributeName: 'SK', AttributeType: 'S' },
     { AttributeName: 'GSI1PK', AttributeType: 'S' },
     { AttributeName: 'GSI1SK', AttributeType: 'S' },
+    { AttributeName: 'GSI2PK', AttributeType: 'S' },
+    { AttributeName: 'GSI2SK', AttributeType: 'S' },
   ],
   KeySchema: [
     { AttributeName: 'PK', KeyType: 'HASH' },
@@ -43,6 +45,22 @@ export const tableDefinition = (tableName: string): CreateTableCommandInput => (
       ],
       // Sparse: only items belonging to a parent set these attributes, so the
       // index holds documents and follow-ups rather than a copy of everything.
+      Projection: { ProjectionType: 'ALL' },
+    },
+    {
+      /**
+       * "Which patients can this account reach" — the first query after
+       * sign-in, and the reverse of the grant items' own key.
+       *
+       * Sparse in the same way: only grant items set these attributes, so the
+       * index is one row per account per patient rather than a second copy of
+       * the table.
+       */
+      IndexName: GSI2_NAME,
+      KeySchema: [
+        { AttributeName: 'GSI2PK', KeyType: 'HASH' },
+        { AttributeName: 'GSI2SK', KeyType: 'RANGE' },
+      ],
       Projection: { ProjectionType: 'ALL' },
     },
   ],

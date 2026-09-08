@@ -16,6 +16,19 @@
 
 export type OwnerId = string;
 
+/**
+ * An account that signs in. The verified token subject, always.
+ *
+ * Distinct from {@link PatientId}: `AccountId` is who is asking, `PatientId` is
+ * whose record it is. The original schema had only the first, which is why
+ * "share my mother's record" had no answer short of handing over a whole
+ * tenant. See ADR-005.
+ */
+export type AccountId = string;
+
+/** The subject of a record. Stable, and independent of who can reach it. */
+export type PatientId = string;
+
 /** Partition key. One tenant per partition, so nothing crosses by accident. */
 export const ownerPk = (ownerId: OwnerId): string => `USER#${ownerId}`;
 
@@ -94,3 +107,93 @@ export const followUpGsiSk = (dueDate: string, followUpId: string): string =>
   `FUP#${dueDate}#${followUpId}`;
 
 export const GSI1_NAME = 'GSI1';
+
+
+// ---------------------------------------------------------------------------
+// Patient partitions, grants and invitations — ADR-005
+//
+// **Divergence 3 from § 4, and the largest.** Clinical items move out of the
+// caregiver's `USER#` partition into a partition belonging to the *patient*.
+//
+// The old layout could not express shared access at all: every item was keyed
+// by the account that created it, so the only way to let a second person read a
+// parent's documents was to let them read that whole account. Keying by patient
+// makes access a separate question, answered by a grant, and makes it possible
+// to revoke one person without moving any data.
+//
+// `USER#` partitions are not removed. They keep account-level state — profile,
+// consent, device mappings — which genuinely does belong to the account.
+// ---------------------------------------------------------------------------
+
+/** The partition holding one patient's record. */
+export const patientPk = (patientId: PatientId): string => `PATIENT#${patientId}`;
+
+/** The patient's own profile item. */
+export const PATIENT_PROFILE_SK = 'PROFILE';
+
+/**
+ * One account's access to this patient, inside the patient's own partition.
+ *
+ * Deliberately co-located with the record rather than kept in a separate table.
+ * The check that runs before every request is "does this account hold a grant
+ * on this patient", and putting the answer in the same partition as the data
+ * makes that one point read rather than a cross-table lookup that could be
+ * skipped, cached or fail open.
+ */
+export const grantSk = (accountId: AccountId): string => `GRANT#${accountId}`;
+export const GRANT_PREFIX = 'GRANT#';
+
+/**
+ * An outstanding invitation, keyed by a **hash** of the token.
+ *
+ * The token itself is never stored. An invitation token is a bearer credential
+ * for a few days; a database dump containing them would be a set of working
+ * keys to other people's medical records. Storing only the hash means a leak of
+ * the table cannot be replayed.
+ */
+export const invitationSk = (tokenHash: string): string => `INVITE#${tokenHash}`;
+export const INVITATION_PREFIX = 'INVITE#';
+
+/**
+ * `GSI2` — every patient one account can reach.
+ *
+ * The reverse of `grantSk`: that answers "who can see this patient", this
+ * answers "which patients can I see", which is the first query the app makes
+ * after sign-in. Sparse — only grant items carry these attributes.
+ */
+export const accountGsiPk = (accountId: AccountId): string => `ACCOUNT#${accountId}`;
+export const grantGsiSk = (patientId: PatientId): string => `PATIENT#${patientId}`;
+export const GSI2_NAME = 'GSI2';
+
+/**
+ * Clinical items inside a patient partition.
+ *
+ * Same sort-key shapes as the owner-partitioned versions above, so the queries
+ * and the index behaviour carry over unchanged; only the partition moves.
+ */
+export const patientDocumentSk = (documentId: string): string => `DOC#${documentId}`;
+export const patientProcessingSk = (documentId: string): string => `PROCESSING#${documentId}`;
+export const patientSummarySk = (documentId: string): string => `SUMMARY#${documentId}`;
+export const patientFollowUpSk = (dueDate: string, followUpId: string): string =>
+  `FUP#${dueDate}#${followUpId}`;
+
+/**
+ * `GSI1`, for a patient partition: documents in document-date order.
+ *
+ * The owner is no longer part of the index partition, because the record no
+ * longer belongs to one. A patient id is a generated identifier and not a
+ * secret, and it is never the only thing standing between a caller and the
+ * data — a grant check runs first, on every path.
+ */
+export const patientGsiPk = (patientId: PatientId): string => `PATIENT#${patientId}`;
+
+/**
+ * Audit entries, in the patient's partition rather than the actor's.
+ *
+ * "Who changed my record" is a question the patient asks, so the answer lives
+ * with the record. Metadata only — ADR-001's logging rule applies here with
+ * more force, because this outlives the request that wrote it.
+ */
+export const patientAuditSk = (timestamp: string, eventId: string): string =>
+  `AUDIT#${timestamp}#${eventId}`;
+export const PATIENT_AUDIT_PREFIX = 'AUDIT#';

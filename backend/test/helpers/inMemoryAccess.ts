@@ -1,0 +1,249 @@
+import type {
+  AcceptResult,
+  AccessRepository,
+  Invitation,
+  IssuedInvitation,
+} from '../../src/services/access/AccessRepository.js';
+import type { Grant } from '../../src/services/access/policy.js';
+import type {
+  AuditEntry,
+  PatientRecord,
+  PatientRecordRepository,
+} from '../../src/services/records/PatientRecordRepository.js';
+import type {
+  DocumentRecord,
+  FollowUpRecord,
+  ProcessingRecord,
+  SummaryRecord,
+} from '../../src/services/records/RecordRepository.js';
+
+/**
+ * In-memory stand-ins for the two repositories, so the authorisation matrix can
+ * be exercised without DynamoDB.
+ *
+ * ## What these prove, and what they do not
+ *
+ * They prove the **routes**: which caller gets which status code, which role
+ * may do what, that a revoked grant stops working, that an invitation is spent
+ * once. Those are decisions made in `access.ts` and `policy.ts`, and a fake
+ * store exercises them exactly as a real one would.
+ *
+ * They do **not** prove the storage semantics the real repository leans on —
+ * the conditional writes that make "claim this invitation" and "revoke this
+ * grant" atomic under a race. Those are DynamoDB's, and only an integration
+ * test against DynamoDB can show them working. `test/integration/access.test.ts`
+ * does that, and skips when the local stack is not running.
+ *
+ * The conditional behaviour is modelled here anyway, so a route that depends on
+ * it fails in both places rather than passing here and breaking on AWS.
+ */
+
+export const inMemoryAccessRepository = (): AccessRepository => {
+  const grants = new Map<string, Grant>();
+  const invitations = new Map<string, Invitation>();
+  let tokenCounter = 0;
+
+  const key = (patientId: string, accountId: string): string => `${patientId}::${accountId}`;
+
+  const putIfAbsent = (grant: Grant): Grant | null => {
+    if (grants.has(key(grant.patientId, grant.accountId))) return null;
+    grants.set(key(grant.patientId, grant.accountId), grant);
+    return grant;
+  };
+
+  const listForPatient = (patientId: string): Grant[] =>
+    [...grants.values()].filter((grant) => grant.patientId === patientId);
+
+  return {
+    async createSelfGrant(patientId, accountId) {
+      if (listForPatient(patientId).some((grant) => grant.role === 'self')) return null;
+      return putIfAbsent({
+        patientId,
+        accountId,
+        role: 'self',
+        status: 'active',
+        grantedBy: accountId,
+        grantedAt: new Date().toISOString(),
+      });
+    },
+
+    async createManagerGrant(patientId, accountId) {
+      return putIfAbsent({
+        patientId,
+        accountId,
+        role: 'manager',
+        status: 'active',
+        grantedBy: accountId,
+        grantedAt: new Date().toISOString(),
+      });
+    },
+
+    async getGrant(patientId, accountId) {
+      return grants.get(key(patientId, accountId)) ?? null;
+    },
+
+    async listGrantsForPatient(patientId) {
+      return listForPatient(patientId);
+    },
+
+    async listGrantsForAccount(accountId) {
+      return [...grants.values()].filter((grant) => grant.accountId === accountId);
+    },
+
+    async revokeGrant(patientId, accountId, revokedBy) {
+      const existing = grants.get(key(patientId, accountId));
+      // Models the conditional write: only an active grant can be revoked, so a
+      // second revoke cannot rewrite who withdrew access and when.
+      if (existing === undefined || existing.status !== 'active') return null;
+
+      const revoked: Grant = {
+        ...existing,
+        status: 'revoked',
+        revokedAt: new Date().toISOString(),
+        revokedBy,
+      };
+      grants.set(key(patientId, accountId), revoked);
+      return revoked;
+    },
+
+    async createInvitation({ patientId, role, invitedBy, ttlSeconds, inviteeHint }) {
+      tokenCounter += 1;
+      const token = `${patientId}.secret-${tokenCounter}`;
+      const now = new Date();
+      const invitation: Invitation = {
+        patientId,
+        role,
+        invitedBy,
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + ttlSeconds * 1000).toISOString(),
+        status: 'pending',
+        ...(inviteeHint === undefined ? {} : { inviteeHint }),
+      };
+      invitations.set(token, invitation);
+      return { token, invitation } satisfies IssuedInvitation;
+    },
+
+    async listInvitationsForPatient(patientId) {
+      return [...invitations.values()].filter((invitation) => invitation.patientId === patientId);
+    },
+
+    async acceptInvitation(token, accountId, now = new Date()): Promise<AcceptResult> {
+      const invitation = invitations.get(token);
+      if (
+        invitation === undefined ||
+        invitation.status !== 'pending' ||
+        new Date(invitation.expiresAt).getTime() <= now.getTime()
+      ) {
+        return { outcome: 'rejected' };
+      }
+
+      const existing = grants.get(key(invitation.patientId, accountId));
+      if (existing !== undefined && existing.status === 'active') {
+        return { outcome: 'already_granted', grant: existing };
+      }
+
+      // Burn first, as the real one does.
+      invitations.set(token, {
+        ...invitation,
+        status: 'accepted',
+        acceptedBy: accountId,
+        acceptedAt: now.toISOString(),
+      });
+
+      const grant: Grant = {
+        patientId: invitation.patientId,
+        accountId,
+        role: invitation.role,
+        status: 'active',
+        grantedBy: invitation.invitedBy,
+        grantedAt: now.toISOString(),
+      };
+      grants.set(key(grant.patientId, grant.accountId), grant);
+      return { outcome: 'accepted', grant };
+    },
+
+    async revokeInvitation(patientId, token) {
+      const invitation = invitations.get(token);
+      if (
+        invitation === undefined ||
+        invitation.patientId !== patientId ||
+        invitation.status !== 'pending'
+      ) {
+        return false;
+      }
+      invitations.set(token, { ...invitation, status: 'revoked' });
+      return true;
+    },
+  };
+};
+
+export const inMemoryPatientRepository = (): PatientRecordRepository => {
+  const patients = new Map<string, PatientRecord>();
+  const documents = new Map<string, DocumentRecord>();
+  const processing = new Map<string, ProcessingRecord>();
+  const summaries = new Map<string, SummaryRecord>();
+  const followUps = new Map<string, FollowUpRecord>();
+  const audit: AuditEntry[] = [];
+
+  const key = (patientId: string, id: string): string => `${patientId}::${id}`;
+
+  return {
+    async putPatient(patient) {
+      patients.set(patient.patientId, patient);
+    },
+    async getPatient(patientId) {
+      return patients.get(patientId) ?? null;
+    },
+    async deletePatient(patientId) {
+      patients.delete(patientId);
+    },
+
+    async putDocument(patientId, document) {
+      documents.set(key(patientId, document.documentId), document);
+    },
+    async getDocument(patientId, documentId) {
+      return documents.get(key(patientId, documentId)) ?? null;
+    },
+    async listDocuments(patientId) {
+      return [...documents.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
+    },
+    async deleteDocument(patientId, documentId) {
+      documents.delete(key(patientId, documentId));
+    },
+
+    async putProcessing(patientId, record) {
+      processing.set(key(patientId, record.documentId), record);
+    },
+    async getProcessing(patientId, documentId) {
+      return processing.get(key(patientId, documentId)) ?? null;
+    },
+
+    async putSummary(patientId, summary) {
+      summaries.set(key(patientId, summary.documentId), summary);
+    },
+    async getSummary(patientId, documentId) {
+      return summaries.get(key(patientId, documentId)) ?? null;
+    },
+
+    async putFollowUp(patientId, followUp) {
+      followUps.set(key(patientId, followUp.followUpId), followUp);
+    },
+    async listFollowUps(patientId) {
+      return [...followUps.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
+    },
+
+    async appendAudit(entry) {
+      audit.push(entry);
+    },
+    async listAudit(patientId, limit = 50) {
+      return audit
+        .filter((entry) => entry.patientId === patientId)
+        .sort((a, b) => b.at.localeCompare(a.at))
+        .slice(0, limit);
+    },
+  };
+};

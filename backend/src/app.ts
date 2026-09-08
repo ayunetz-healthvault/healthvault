@@ -8,11 +8,20 @@ import { installAuthentication } from './routes/authentication.js';
 import { healthRoutes } from './routes/health.js';
 import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
+import { accessRoutes } from './routes/v1/access.js';
 import { documentRoutes } from './routes/v1/documents.js';
 import { parentRoutes } from './routes/v1/parents.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
 import { createObjectStore, type ObjectStore } from './services/objects/ObjectStore.js';
 import { createJobQueue, type JobQueue } from './services/queue/JobQueue.js';
+import {
+  createAccessRepository,
+  type AccessRepository,
+} from './services/access/AccessRepository.js';
+import {
+  createPatientRecordRepository,
+  type PatientRecordRepository,
+} from './services/records/PatientRecordRepository.js';
 import {
   createRecordRepository,
   type RecordRepository,
@@ -31,6 +40,10 @@ export interface BuildAppOptions {
   verifier?: TokenVerifier;
   /** Injected so the API can be tested without the local stack running. */
   repository?: RecordRepository;
+  /** Grants and invitations. See ADR-005. */
+  access?: AccessRepository;
+  /** Patient-partitioned clinical records. See ADR-005. */
+  patients?: PatientRecordRepository;
   objects?: ObjectStore;
   queue?: JobQueue;
   /** Injected so routes can be tested without an OCR engine or AI provider. */
@@ -123,9 +136,12 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
 
   app.register(async (v1) => {
     const repository = options.repository ?? createRecordRepository(stack);
+    const access = options.access ?? createAccessRepository(stack);
+    const patients = options.patients ?? createPatientRecordRepository(stack);
     const objects = options.objects ?? createObjectStore(stack);
     const queue = options.queue ?? createJobQueue(stack);
 
+    await v1.register(accessRoutes, { access, patients });
     await v1.register(parentRoutes, { repository });
     await v1.register(documentRoutes, { repository, objects, queue });
   });
