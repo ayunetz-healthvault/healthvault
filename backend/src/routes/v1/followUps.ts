@@ -2,7 +2,11 @@ import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import type { AccessRepository } from '../../services/access/AccessRepository.js';
-import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
+import {
+  FollowUpExistsError,
+  RecordDeletedError,
+  type PatientRecordRepository,
+} from '../../services/records/PatientRecordRepository.js';
 import type { FollowUpRecord } from '../../services/records/RecordRepository.js';
 import { requireAccess } from './requireAccess.js';
 import { beingDeleted, callerOf, notFound } from './shared.js';
@@ -163,22 +167,6 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
         return reply.code(RECORD_DELETING).send(beingDeleted());
       }
 
-      /**
-       * Already here.
-       *
-       * The retry of a request that committed, or the second tap of a button on
-       * a slow connection. Either way the answer is the follow-up that exists,
-       * with a 200 rather than a 201 so a caller can tell the two apart — and
-       * no second audit entry, because nothing was created.
-       */
-      if (body.data.followUpId !== undefined) {
-        const existing = await patients.getFollowUp(
-          params.data.patientId,
-          body.data.followUpId,
-        );
-        if (existing !== null) return reply.code(200).send({ followUp: existing });
-      }
-
       const now = new Date().toISOString();
       const followUp: FollowUpRecord = clean({
         followUpId:
@@ -199,7 +187,57 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
         updatedAt: now,
       });
 
-      await patients.putFollowUp(params.data.patientId, followUp);
+      /**
+       * Created, or refused because that id is already in use.
+       *
+       * The claim is what makes this safe under a retry, and reading first
+       * would not have been. Two attempts at the same create — a phone that
+       * lost the first response, a double tap on a slow connection — can both
+       * find nothing there; the version this replaces then let the second one
+       * overwrite the first, which reset a task somebody had already completed
+       * back to `scheduled` and lost their tick. Only one of them can hold the
+       * claim, and the loser is answered with the task that exists.
+       */
+      try {
+        await patients.createFollowUp(params.data.patientId, followUp);
+      } catch (error) {
+        if (error instanceof RecordDeletedError) {
+          return reply.code(RECORD_DELETING).send(beingDeleted());
+        }
+        if (!(error instanceof FollowUpExistsError)) throw error;
+
+        const claim = await patients.followUpClaim(
+          params.data.patientId,
+          followUp.followUpId,
+        );
+
+        /**
+         * The task was created and has since been deleted.
+         *
+         * Answering with a fresh copy would put a cancelled appointment back on
+         * everybody's phone, which is why the claim outlives the row. `410
+         * Gone` rather than a 404: it existed, it does not now, and retrying
+         * will never change that.
+         */
+        if (claim?.deletedAt !== undefined) {
+          return reply.code(RECORD_DELETING).send({
+            code: 'follow_up_deleted' as const,
+            message: 'This follow-up was deleted.',
+            retryable: false,
+          });
+        }
+
+        const existing = await patients.getFollowUp(
+          params.data.patientId,
+          followUp.followUpId,
+        );
+        if (existing === null) throw error;
+
+        // 200 rather than 201, so a caller can tell "yours" from "already
+        // there", and no second audit entry, because nothing was created.
+        return reply.code(200).send({ followUp: existing });
+      }
+
       await patients.appendAudit({
         eventId: `${now}-followup-created`,
         patientId: params.data.patientId,
@@ -272,18 +310,20 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
       });
 
       /**
-       * A changed due date changes the sort key, so the old row is removed
-       * rather than left behind as a duplicate at the previous date.
+       * A changed due date changes the sort key, so rescheduling is a move: the
+       * old row goes and the new one appears, in one transaction. Deleting and
+       * then writing would leave a window in which the family sees the same
+       * appointment on two days, or on none.
+       *
+       * It is a move rather than a delete-and-create for a second reason: the
+       * task's id claim survives it. Rescheduling is not deleting, and a
+       * delayed retry of the original create must still find the id taken.
        */
       if (updated.dueDate !== existing.dueDate) {
-        await patients.deleteFollowUp(
-          params.data.patientId,
-          existing.dueDate,
-          existing.followUpId,
-        );
+        await patients.moveFollowUp(params.data.patientId, existing.dueDate, updated);
+      } else {
+        await patients.putFollowUp(params.data.patientId, updated);
       }
-
-      await patients.putFollowUp(params.data.patientId, updated);
 
       return reply.send({ followUp: updated });
     },

@@ -38,6 +38,8 @@ const objects: ObjectStore = {
   get: async () => new Uint8Array(),
   exists: async () => true,
   delete: async () => undefined,
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: async () => ({ objects: 0 }),
 };
 
 const PATIENT = 'pat_1';
@@ -389,5 +391,84 @@ describe('a missed appointment', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ followUp: { status: 'missed' } });
+  });
+});
+
+/**
+ * Two attempts at one create, overlapping.
+ *
+ * The stable id fixed the identity and the ordinary sequential replay; it did
+ * not fix this. Both attempts could read "no such follow-up" and both could
+ * write, because a read followed by a write is not an idempotency mechanism —
+ * it is a race with a comfortable-looking window. The loser wrote last, so a
+ * delayed first attempt would overwrite the task the retry had created and
+ * somebody had already completed, putting it back to `scheduled` and losing
+ * their tick.
+ *
+ * The claim is what closes it: one item per follow-up id, written with a
+ * condition, in the same transaction as the row.
+ */
+describe('two creates racing for the same id', () => {
+  it('lets exactly one of them create the task', async () => {
+    const [first, second] = await Promise.all([
+      create('acc_alice', { followUpId: 'fup_local_1' }),
+      create('acc_alice', { followUpId: 'fup_local_1' }),
+    ]);
+
+    const codes = [first.statusCode, second.statusCode].sort();
+    expect(codes).toEqual([200, 201]);
+    expect(await patients.listFollowUps(PATIENT)).toHaveLength(1);
+  });
+
+  /**
+   * The scenario the review asked for by name: the first create is delayed
+   * until after the retry has created the task and somebody has completed it.
+   * The completion must survive.
+   */
+  it('does not let a delayed first attempt undo a completion', async () => {
+    // The retry wins the race and the task is completed.
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await patch('acc_alice', 'fup_local_1', { status: 'completed' });
+
+    // The original attempt finally arrives, carrying the same draft as before.
+    const late = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(late.statusCode).toBe(200);
+    expect(late.json()).toMatchObject({ followUp: { status: 'completed' } });
+
+    const stored = await patients.listFollowUps(PATIENT);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ status: 'completed' });
+  });
+
+  /** Rescheduling is not deleting: the claim survives a moved due date. */
+  it('still recognises the id after the task has been rescheduled', async () => {
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await patch('acc_alice', 'fup_local_1', { dueDate: '2026-11-02' });
+
+    const late = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(late.statusCode).toBe(200);
+    expect(late.json()).toMatchObject({ followUp: { dueDate: '2026-11-02' } });
+    expect(await patients.listFollowUps(PATIENT)).toHaveLength(1);
+  });
+
+  /**
+   * And a delayed create whose task has since been deleted does not put the
+   * appointment back — which is why the claim outlives the row.
+   */
+  it('refuses to resurrect a task that was deleted', async () => {
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await app.inject({
+      method: 'DELETE',
+      url: `/v1/patients/${PATIENT}/follow-ups/fup_local_1`,
+      headers: await auth('acc_alice'),
+    });
+
+    const late = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(late.statusCode).toBe(410);
+    expect(late.json()).toMatchObject({ code: 'follow_up_deleted' });
+    expect(await patients.listFollowUps(PATIENT)).toEqual([]);
   });
 });
