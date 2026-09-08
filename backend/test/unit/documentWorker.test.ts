@@ -36,6 +36,7 @@ const objects: ObjectStore = {
   keyFor: ({ patientId, documentId, page }) =>
     `patients/${patientId}/documents/${documentId}/pages/${String(page).padStart(3, '0')}`,
   presignUpload: async () => ({ key: 'k', url: 'u', expiresInSeconds: 900, headers: {} }),
+  presignDownload: async () => 'https://objects.test.invalid/page',
   put: async () => undefined,
   get: async () => new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
   exists: async () => true,

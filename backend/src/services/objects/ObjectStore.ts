@@ -53,6 +53,15 @@ export interface PresignedUpload {
 export interface ObjectStore {
   keyFor(location: PageLocation): string;
   presignUpload(location: PageLocation, contentType: string): Promise<PresignedUpload>;
+  /**
+   * A short-lived URL for *reading* one page.
+   *
+   * So a person reviewing a summary can look at what the clinician actually
+   * wrote. Deliberately shorter-lived than an upload URL: reading is a glance,
+   * uploading is a transfer over a bad connection, and this is a bearer token
+   * that keeps working after the grant behind it is withdrawn.
+   */
+  presignDownload(location: PageLocation, expiresInSeconds: number): Promise<string>;
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<Uint8Array>;
   exists(key: string): Promise<boolean>;
@@ -100,6 +109,12 @@ export const createObjectStore = (config: StackConfig): ObjectStore => {
 
   return {
     keyFor: pageKey,
+
+    async presignDownload(location, expiresInSeconds) {
+      return getSignedUrl(client, new GetObjectCommand({ Bucket, Key: pageKey(location) }), {
+        expiresIn: expiresInSeconds,
+      });
+    },
 
     async presignUpload(location, contentType) {
       const key = pageKey(location);

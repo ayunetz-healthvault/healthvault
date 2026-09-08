@@ -10,6 +10,7 @@ import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
 import { accessRoutes } from './routes/v1/access.js';
 import { documentRoutes } from './routes/v1/documents.js';
+import { reviewRoutes } from './routes/v1/review.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
 import { createObjectStore, type ObjectStore } from './services/objects/ObjectStore.js';
 import { createJobQueue, type JobQueue } from './services/queue/JobQueue.js';
@@ -146,6 +147,7 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
 
     await v1.register(accessRoutes, { access, patients });
     await v1.register(documentRoutes, { access, patients, objects, queue });
+    await v1.register(reviewRoutes, { access, patients, objects });
   });
 
   /**

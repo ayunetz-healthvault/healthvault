@@ -89,9 +89,65 @@ export interface ProcessingRecord {
 
 export interface SummaryRecord {
   readonly documentId: string;
+  /**
+   * What the pipeline produced, unchanged, forever.
+   *
+   * Corrections do not edit this. A person saying "the date is 3 September, not
+   * 9 March" is a *second* fact about the document, and losing the first one
+   * means nobody can ever tell whether the model was wrong or the corrector
+   * was. See `corrections`.
+   */
   readonly summary: unknown;
   readonly pipelineVersion: string;
   readonly createdAt: string;
+  /**
+   * Increments when the pipeline produces a new summary for this document.
+   *
+   * A correction does *not* increment it — corrections carry their own
+   * `summaryVersion` and are stated against the version they were made on. A
+   * re-run producing version 2 leaves a version-1 correction visibly stale
+   * rather than silently applying it to different text.
+   */
+  readonly version?: number | undefined;
+  /**
+   * Human corrections, newest last, never rewritten.
+   *
+   * Append-only: an edit to a correction is another correction. "Who said what
+   * about this document, and when" is the question, and an audit trail that can
+   * be edited answers nothing.
+   */
+  readonly corrections?: SummaryCorrection[] | undefined;
+  /**
+   * When a person checked this summary against the original, and who.
+   *
+   * Absent means unchecked. Note what it is *not*: a person confirming the app
+   * read the page correctly is not a clinician validating the content, and no
+   * API response or screen may describe it as one.
+   */
+  readonly reviewedAt?: string | undefined;
+  readonly reviewedBy?: string | undefined;
+  /** The summary version that was reviewed. A newer one is unreviewed again. */
+  readonly reviewedVersion?: number | undefined;
+}
+
+/**
+ * One correction, to one field.
+ *
+ * Deliberately not a diff of the whole summary. A caregiver fixes the date, or
+ * one medicine's dose; recording that as "here is the new summary" makes it
+ * impossible to see what they actually disagreed with.
+ */
+export interface SummaryCorrection {
+  readonly correctionId: string;
+  /** Dotted path into the summary, e.g. `findings.2.value`. */
+  readonly field: string;
+  /** What the model said. Kept so the disagreement is legible. */
+  readonly previousValue: string;
+  readonly correctedValue: string;
+  readonly correctedBy: string;
+  readonly correctedAt: string;
+  /** The summary version this was made against. */
+  readonly summaryVersion: number;
 }
 
 export interface FollowUpRecord {
