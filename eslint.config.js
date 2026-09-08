@@ -18,6 +18,10 @@ module.exports = defineConfig([
       'ios/*',
       'coverage/*',
       'backend/*',
+      // Evidence artefacts, not application source: the capture scripts are
+      // meant to print to a terminal, and they are kept as-run so the images
+      // in the same directory can be reproduced exactly.
+      'docs/koode/evidence/*',
     ],
   },
   {

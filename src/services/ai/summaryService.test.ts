@@ -70,13 +70,15 @@ describe('summaryForDocument', () => {
 
 describe('fetchSummary', () => {
   it('finds a seeded summary by document id', async () => {
-    await expect(summaryService.fetchSummary('doc_demo_hba1c')).resolves.toMatchObject({
+    await expect(
+      summaryService.fetchSummary('par_demo_amma', 'doc_demo_hba1c'),
+    ).resolves.toMatchObject({
       id: 'sum_demo_hba1c',
     });
   });
 
   it('returns null when there is no summary', async () => {
-    await expect(summaryService.fetchSummary('doc_unknown')).resolves.toBeNull();
+    await expect(summaryService.fetchSummary('par_demo_amma', 'doc_unknown')).resolves.toBeNull();
   });
 });
 

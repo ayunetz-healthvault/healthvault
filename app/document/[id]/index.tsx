@@ -71,7 +71,7 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
 
   const handleDelete = async (): Promise<void> => {
     setDeleteVisible(false);
-    await accountService.deleteDocument(document.id);
+    await accountService.deleteDocument(document.parentId, document.id);
     removeDocument(document.id);
     router.replace(`/parent/${document.parentId}`);
   };

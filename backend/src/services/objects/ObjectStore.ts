@@ -28,8 +28,15 @@ import type { StackConfig } from '../../config/stack.js';
  * for one key, one method, and a few minutes.
  */
 export interface PageLocation {
-  /** Tenant, from the verified token subject. Never from the request body. */
-  readonly ownerId: string;
+  /**
+   * Whose record this page belongs to.
+   *
+   * Not the account that uploaded it. A page belongs to the patient, so that
+   * revoking a helper moves no bytes, and so "delete this person's record" is
+   * one prefix rather than a hunt through every account that ever contributed
+   * to it. The caller reaches this id only by holding a grant — see ADR-005.
+   */
+  readonly patientId: string;
   readonly documentId: string;
   /** 1-based, matching how pages are numbered everywhere else. */
   readonly page: number;
@@ -55,16 +62,21 @@ export interface ObjectStore {
 /**
  * Object keys.
  *
- * Owner first, so a prefix is a tenant. That makes "delete everything belonging
- * to this account" a prefix operation rather than a scan, which is what makes
- * the erasure path in P2-16 tractable — and it is the shape an IAM policy needs
- * if object-level isolation is ever enforced there too.
+ * **Patient first**, so a prefix is one person's record. That makes "delete
+ * everything about this person" a prefix operation rather than a scan, which is
+ * what makes the erasure path tractable — and it is the shape an IAM policy
+ * needs if object-level isolation is ever enforced there too.
+ *
+ * This changed with ADR-005. The keys were `owners/<accountId>/...`, which tied
+ * a page to whoever uploaded it: revoking that helper would have left the file
+ * sitting under their prefix, and deleting a patient's record would have meant
+ * visiting every account that had ever added to it.
  *
  * The key contains no name, no date of birth and no filename from the device.
  * A bucket listing is metadata, and metadata about medical records leaks.
  */
-export const pageKey = ({ ownerId, documentId, page }: PageLocation): string =>
-  `owners/${ownerId}/documents/${documentId}/pages/${String(page).padStart(3, '0')}`;
+export const pageKey = ({ patientId, documentId, page }: PageLocation): string =>
+  `patients/${patientId}/documents/${documentId}/pages/${String(page).padStart(3, '0')}`;
 
 const toBytes = async (body: unknown): Promise<Uint8Array> => {
   if (body instanceof Uint8Array) return body;

@@ -133,9 +133,11 @@ export const uploadService = {
   }): Promise<PresignedTarget[]> {
     if (isBackendEnabled()) {
       return apiClient.post<PresignedTarget[]>(
-        endpoints.documents.presignUpload(input.documentId),
+        // `parentId` is the patient id: the record the document belongs to.
+        // It is in the path now rather than the body, so the backend checks the
+        // grant before it signs anything. See ADR-005.
+        endpoints.documents.presignUpload(input.parentId, input.documentId),
         {
-          parentId: input.parentId,
           pages: input.pages.map((page) => ({
             pageId: page.id,
             contentType: page.kind === 'pdf' ? 'application/pdf' : 'image/jpeg',
@@ -190,11 +192,16 @@ export const uploadService = {
   },
 
   /** Step 3 — tells the backend every page landed, which enqueues the SQS job. */
-  async completeUpload(documentId: string, objectKeys: string[]): Promise<{ jobId: string }> {
+  async completeUpload(
+    parentId: string,
+    documentId: string,
+    objectKeys: string[],
+  ): Promise<{ jobId: string }> {
     if (isBackendEnabled()) {
-      return apiClient.post<{ jobId: string }>(endpoints.documents.completeUpload(documentId), {
-        objectKeys,
-      });
+      return apiClient.post<{ jobId: string }>(
+        endpoints.documents.completeUpload(parentId, documentId),
+        { objectKeys },
+      );
     }
     return { jobId: `job_${documentId}` };
   },

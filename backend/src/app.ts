@@ -10,7 +10,6 @@ import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
 import { accessRoutes } from './routes/v1/access.js';
 import { documentRoutes } from './routes/v1/documents.js';
-import { parentRoutes } from './routes/v1/parents.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
 import { createObjectStore, type ObjectStore } from './services/objects/ObjectStore.js';
 import { createJobQueue, type JobQueue } from './services/queue/JobQueue.js';
@@ -141,9 +140,12 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
     const objects = options.objects ?? createObjectStore(stack);
     const queue = options.queue ?? createJobQueue(stack);
 
+    // `repository` stays available for the ADR-005 migration and for
+    // account-level items; no /v1 route reads through it any more.
+    void repository;
+
     await v1.register(accessRoutes, { access, patients });
-    await v1.register(parentRoutes, { repository });
-    await v1.register(documentRoutes, { repository, objects, queue });
+    await v1.register(documentRoutes, { access, patients, objects, queue });
   });
 
   /**

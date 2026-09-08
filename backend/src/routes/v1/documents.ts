@@ -1,30 +1,47 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
+import type { AccessRepository } from '../../services/access/AccessRepository.js';
 import type { ObjectStore } from '../../services/objects/ObjectStore.js';
 import type { JobQueue } from '../../services/queue/JobQueue.js';
-import type { RecordRepository } from '../../services/records/RecordRepository.js';
+import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
 import { callerOf, notFound } from './shared.js';
+import { requireAccess } from './requireAccess.js';
 
 /**
  * Documents, and the upload protocol.
  *
  * The flow, and why it has three steps rather than one:
  *
- *   POST /v1/documents                       record first, so nothing is
- *                                            uploaded that has nowhere to live
- *   POST /v1/documents/:id/uploads           short-lived presigned PUT per page
- *   PUT  <presigned url>                     phone → object store, directly
- *   POST /v1/documents/:id/uploads/complete  verify, then enqueue
+ *   POST /v1/patients/:id/documents                  record first, so nothing
+ *                                                    is uploaded with nowhere
+ *                                                    to live
+ *   POST .../documents/:documentId/uploads           short-lived presigned PUT
+ *                                                    per page
+ *   PUT  <presigned url>                             phone → object store
+ *   POST .../documents/:documentId/uploads/complete  verify, then enqueue
  *
  * Document bytes never pass through this service. That removes a whole class of
  * accident — no scan of a prescription in a request log, a heap dump or a proxy
  * cache — and means the client never holds a credential that can write anywhere
  * but the keys it was given.
+ *
+ * ## Every route names the patient
+ *
+ * The patient id is in the path, not inferred from the document. That is what
+ * makes authorisation structural: a handler cannot reach a document without
+ * first having named whose record it is, and `requireAccess` has already
+ * refused if the caller holds no grant on that record.
+ *
+ * The previous shape — `/v1/documents/:documentId`, scoped to the caller's own
+ * partition — could not survive shared records. With more than one account able
+ * to reach a document, "whose is it" stops being answerable from the token
+ * alone. See ADR-005.
  */
 
 export interface DocumentRoutesOptions {
-  repository: RecordRepository;
+  access: AccessRepository;
+  patients: PatientRecordRepository;
   objects: ObjectStore;
   queue: JobQueue;
 }
@@ -32,20 +49,21 @@ export interface DocumentRoutesOptions {
 /** Matches what the pipeline can actually read. */
 const CONTENT_TYPES = ['image/jpeg', 'image/png', 'application/pdf'] as const;
 
+const patientParam = z.object({ patientId: z.string().min(1).max(128) });
+const documentParam = patientParam.extend({ documentId: z.string().min(1).max(128) });
+
 const documentDraft = z.object({
-  parentId: z.string().min(1).max(128),
   title: z.string().min(1).max(200),
   category: z.string().min(1).max(40),
   documentDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   pageCount: z.number().int().positive().max(10),
 });
 
-const documentId = z.object({ documentId: z.string().min(1).max(128) });
-const parentIdParam = z.object({ parentId: z.string().min(1).max(128) });
-
 const uploadRequest = z.object({
   pages: z
-    .array(z.object({ page: z.number().int().positive().max(10), contentType: z.enum(CONTENT_TYPES) }))
+    .array(
+      z.object({ page: z.number().int().positive().max(10), contentType: z.enum(CONTENT_TYPES) }),
+    )
     .min(1)
     .max(10),
 });
@@ -58,96 +76,140 @@ const invalid = (message: string) => ({
 
 export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
   app,
-  { repository, objects, queue },
+  { access, patients, objects, queue },
 ) => {
-  app.post('/v1/documents', { preHandler: app.authenticate }, async (request, reply) => {
-    const parsed = documentDraft.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send(invalid('Check the document details.'));
-
-    const ownerId = callerOf(request).ownerId;
-
-    // The parent must be the caller's. Without this a client could file a
-    // document against an id belonging to somebody else's account — it would
-    // land in the caller's own partition, but the record would carry a foreign
-    // parent id and the index would be nonsense.
-    const parent = await repository.getParent(ownerId, parsed.data.parentId);
-    if (parent === null) return reply.code(404).send(notFound('parent'));
-
-    const now = new Date().toISOString();
-    const document = {
-      documentId: `doc_${crypto.randomUUID()}`,
-      ...parsed.data,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    await repository.putDocument(ownerId, document);
-    await repository.putProcessing(ownerId, {
-      documentId: document.documentId,
-      status: 'awaiting_upload',
-      attempts: 0,
-      updatedAt: now,
-    });
-
-    return reply.code(201).send({ document });
-  });
-
-  app.get('/v1/documents/:documentId', { preHandler: app.authenticate }, async (request, reply) => {
-    const parsed = documentId.safeParse(request.params);
-    if (!parsed.success) return reply.code(400).send(invalid('Provide a document id.'));
-
-    const document = await repository.getDocument(
-      callerOf(request).ownerId,
-      parsed.data.documentId,
-    );
-    if (document === null) return reply.code(404).send(notFound('document'));
-
-    return reply.send({ document });
-  });
-
-  app.get(
-    '/v1/parents/:parentId/documents',
+  app.post(
+    '/v1/patients/:patientId/documents',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const parsed = parentIdParam.safeParse(request.params);
-      if (!parsed.success) return reply.code(400).send(invalid('Provide a parent id.'));
+      const params = patientParam.safeParse(request.params);
+      const body = documentDraft.safeParse(request.body);
+      if (!params.success || !body.success) {
+        return reply.code(400).send(invalid('Check the document details.'));
+      }
 
-      return reply.send({
-        documents: await repository.listDocumentsForParent(
-          callerOf(request).ownerId,
-          parsed.data.parentId,
-        ),
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'upload_document',
+      );
+      if (grant === null) return reply;
+
+      const now = new Date().toISOString();
+      const document = {
+        documentId: `doc_${crypto.randomUUID()}`,
+        parentId: params.data.patientId,
+        ...body.data,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      await patients.putDocument(params.data.patientId, document);
+      await patients.putProcessing(params.data.patientId, {
+        documentId: document.documentId,
+        status: 'awaiting_upload',
+        attempts: 0,
+        updatedAt: now,
       });
+      await patients.appendAudit({
+        eventId: crypto.randomUUID(),
+        patientId: params.data.patientId,
+        actorAccountId: grant.accountId,
+        action: 'create',
+        entity: 'document',
+        entityId: document.documentId,
+        at: now,
+      });
+
+      return reply.code(201).send({ document });
+    },
+  );
+
+  app.get(
+    '/v1/patients/:patientId/documents',
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = patientParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a patient id.'));
+
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'read_record',
+      );
+      if (grant === null) return reply;
+
+      return reply.send({ documents: await patients.listDocuments(params.data.patientId) });
+    },
+  );
+
+  app.get(
+    '/v1/patients/:patientId/documents/:documentId',
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
+
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'read_record',
+      );
+      if (grant === null) return reply;
+
+      const document = await patients.getDocument(params.data.patientId, params.data.documentId);
+      if (document === null) return reply.code(404).send(notFound('document'));
+
+      return reply.send({ document });
     },
   );
 
   app.post(
-    '/v1/documents/:documentId/uploads',
+    '/v1/patients/:patientId/documents/:documentId/uploads',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const params = documentId.safeParse(request.params);
+      const params = documentParam.safeParse(request.params);
       const body = uploadRequest.safeParse(request.body);
       if (!params.success || !body.success) {
         return reply.code(400).send(invalid('Provide the pages to upload.'));
       }
 
-      const ownerId = callerOf(request).ownerId;
-      const document = await repository.getDocument(ownerId, params.data.documentId);
+      /**
+       * The grant is checked before a URL is signed, not after.
+       *
+       * A presigned URL outlives the request that issued it, so signing one for
+       * a caller who turns out to have no grant hands them a credential that
+       * keeps working after the refusal.
+       */
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'upload_document',
+      );
+      if (grant === null) return reply;
+
+      const document = await patients.getDocument(params.data.patientId, params.data.documentId);
       if (document === null) return reply.code(404).send(notFound('document'));
 
       if (body.data.pages.length !== document.pageCount) {
-        return reply.code(400).send(
-          invalid(`This document has ${document.pageCount} page(s).`),
-        );
+        return reply.code(400).send(invalid(`This document has ${document.pageCount} page(s).`));
       }
 
       const uploads = await Promise.all(
         body.data.pages.map(async ({ page, contentType }) => ({
           page,
           ...(await objects.presignUpload(
-            // The owner comes from the token, so a signed URL can only ever
-            // point inside the caller's own prefix.
-            { ownerId, documentId: document.documentId, page },
+            // The patient comes from a path the caller proved access to, so a
+            // signed URL can only ever point inside that record's prefix.
+            { patientId: params.data.patientId, documentId: document.documentId, page },
             contentType,
           )),
         })),
@@ -158,14 +220,22 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
   );
 
   app.post(
-    '/v1/documents/:documentId/uploads/complete',
+    '/v1/patients/:patientId/documents/:documentId/uploads/complete',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const params = documentId.safeParse(request.params);
+      const params = documentParam.safeParse(request.params);
       if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
 
-      const ownerId = callerOf(request).ownerId;
-      const document = await repository.getDocument(ownerId, params.data.documentId);
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'upload_document',
+      );
+      if (grant === null) return reply;
+
+      const document = await patients.getDocument(params.data.patientId, params.data.documentId);
       if (document === null) return reply.code(404).send(notFound('document'));
 
       /**
@@ -179,7 +249,13 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       const pages = Array.from({ length: document.pageCount }, (_, index) => index + 1);
       const present = await Promise.all(
         pages.map((page) =>
-          objects.exists(objects.keyFor({ ownerId, documentId: document.documentId, page })),
+          objects.exists(
+            objects.keyFor({
+              patientId: params.data.patientId,
+              documentId: document.documentId,
+              page,
+            }),
+          ),
         ),
       );
       const missing = pages.filter((_, index) => present[index] !== true);
@@ -193,27 +269,25 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
         });
       }
 
-      /**
-       * A phone on a train retries. Claiming the key before enqueuing means the
-       * second attempt is told the job is already running rather than queuing a
-       * duplicate — which would summarise the same document twice and, once
-       * follow-up extraction lands, create the same reminder twice.
-       */
-      const claimed = await repository.claimIdempotencyKey(
-        ownerId,
-        'complete_upload',
+      const existing = await patients.getProcessing(
+        params.data.patientId,
         document.documentId,
       );
 
-      if (!claimed) {
-        return reply.code(200).send({
-          processing: await repository.getProcessing(ownerId, document.documentId),
-          alreadyQueued: true,
-        });
+      /**
+       * A phone on a train retries.
+       *
+       * The state itself is the idempotency marker: once processing has left
+       * `awaiting_upload`, a second completion is told the job is already in
+       * flight rather than queuing a duplicate — which would summarise the same
+       * document twice and create the same follow-up twice.
+       */
+      if (existing !== null && existing.status !== 'awaiting_upload') {
+        return reply.code(200).send({ processing: existing, alreadyQueued: true });
       }
 
       const now = new Date().toISOString();
-      await repository.putProcessing(ownerId, {
+      await patients.putProcessing(params.data.patientId, {
         documentId: document.documentId,
         status: 'queued',
         attempts: 0,
@@ -221,29 +295,38 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       });
 
       await queue.enqueue({
-        ownerId,
+        patientId: params.data.patientId,
         documentId: document.documentId,
         pageCount: document.pageCount,
         attemptToken: `${document.documentId}#1`,
       });
 
       return reply.code(202).send({
-        processing: await repository.getProcessing(ownerId, document.documentId),
+        processing: await patients.getProcessing(params.data.patientId, document.documentId),
         alreadyQueued: false,
       });
     },
   );
 
   app.get(
-    '/v1/documents/:documentId/processing',
+    '/v1/patients/:patientId/documents/:documentId/processing',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const parsed = documentId.safeParse(request.params);
-      if (!parsed.success) return reply.code(400).send(invalid('Provide a document id.'));
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
 
-      const processing = await repository.getProcessing(
-        callerOf(request).ownerId,
-        parsed.data.documentId,
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'read_record',
+      );
+      if (grant === null) return reply;
+
+      const processing = await patients.getProcessing(
+        params.data.patientId,
+        params.data.documentId,
       );
       if (processing === null) return reply.code(404).send(notFound('document'));
 
@@ -252,16 +335,22 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
   );
 
   app.get(
-    '/v1/documents/:documentId/summary',
+    '/v1/patients/:patientId/documents/:documentId/summary',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const parsed = documentId.safeParse(request.params);
-      if (!parsed.success) return reply.code(400).send(invalid('Provide a document id.'));
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
 
-      const summary = await repository.getSummary(
-        callerOf(request).ownerId,
-        parsed.data.documentId,
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'read_record',
       );
+      if (grant === null) return reply;
+
+      const summary = await patients.getSummary(params.data.patientId, params.data.documentId);
       if (summary === null) return reply.code(404).send(notFound('summary'));
 
       return reply.send({ summary });
@@ -269,14 +358,24 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
   );
 
   app.delete(
-    '/v1/documents/:documentId',
+    '/v1/patients/:patientId/documents/:documentId',
     { preHandler: app.authenticate },
     async (request, reply) => {
-      const parsed = documentId.safeParse(request.params);
-      if (!parsed.success) return reply.code(400).send(invalid('Provide a document id.'));
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
 
-      const ownerId = callerOf(request).ownerId;
-      const document = await repository.getDocument(ownerId, parsed.data.documentId);
+      // Deleting is not contributing: a helper who may add documents may not
+      // remove them. See `policy.ts`.
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'delete_document',
+      );
+      if (grant === null) return reply;
+
+      const document = await patients.getDocument(params.data.patientId, params.data.documentId);
       if (document === null) return reply.code(404).send(notFound('document'));
 
       // Pages first. A record with no pages is a fixable inconsistency; pages
@@ -285,12 +384,26 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       await Promise.all(
         Array.from({ length: document.pageCount }, (_, index) =>
           objects.delete(
-            objects.keyFor({ ownerId, documentId: document.documentId, page: index + 1 }),
+            objects.keyFor({
+              patientId: params.data.patientId,
+              documentId: document.documentId,
+              page: index + 1,
+            }),
           ),
         ),
       );
 
-      await repository.deleteDocument(ownerId, document.documentId);
+      await patients.deleteDocument(params.data.patientId, document.documentId);
+      await patients.appendAudit({
+        eventId: crypto.randomUUID(),
+        patientId: params.data.patientId,
+        actorAccountId: callerOf(request).ownerId,
+        action: 'delete',
+        entity: 'document',
+        entityId: document.documentId,
+        at: new Date().toISOString(),
+      });
+
       return reply.code(204).send();
     },
   );

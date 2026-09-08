@@ -4,18 +4,22 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../../src/app.js';
 import { loadIdentityConfig } from '../../src/config/identity.js';
 import { loadStackConfig } from '../../src/config/stack.js';
+import { createAccessRepository } from '../../src/services/access/AccessRepository.js';
 import { initialiseLocalStack } from '../../src/services/localStack/initialise.js';
 import { createObjectStore } from '../../src/services/objects/ObjectStore.js';
 import { createJobQueue } from '../../src/services/queue/JobQueue.js';
-import { createRecordRepository } from '../../src/services/records/RecordRepository.js';
+import { createPatientRecordRepository } from '../../src/services/records/PatientRecordRepository.js';
 
 /**
  * The `/v1` API against the running local stack.
  *
  * Everything below goes through the real ports — a real object store, a real
  * queue, real DynamoDB semantics — with a real token. This is the first point
- * at which the four ports are exercised together as the thing the app will
- * actually talk to.
+ * at which the ports are exercised together as the thing the app will actually
+ * talk to.
+ *
+ * Rewritten for ADR-005: every route now names the patient, and a grant is
+ * checked before anything is read, written or signed.
  */
 const stack = loadStackConfig();
 const identity = loadIdentityConfig('local', stack.region, {
@@ -45,22 +49,25 @@ describe.skipIf(!up)('the /v1 API', () => {
 
   const objects = createObjectStore(stack);
 
-  beforeAll(async () => {
-    await initialiseLocalStack(stack);
-
-    app = buildApp({
+  const buildTestApp = (): FastifyInstance =>
+    buildApp({
       stack,
       identity,
-      repository: createRecordRepository(stack),
+      access: createAccessRepository(stack),
+      patients: createPatientRecordRepository(stack),
       objects,
       queue: createJobQueue(stack),
       logStream: silent(),
     });
+
+  beforeAll(async () => {
+    await initialiseLocalStack(stack);
+    app = buildTestApp();
     await app.ready();
 
     const run = Date.now().toString(36);
-    aliceToken = await token(`owner_alice_${run}`);
-    bobToken = await token(`owner_bob_${run}`);
+    aliceToken = await token(`acc_alice_${run}`);
+    bobToken = await token(`acc_bob_${run}`);
   });
 
   afterAll(async () => {
@@ -78,27 +85,30 @@ describe.skipIf(!up)('the /v1 API', () => {
 
   const as = (bearer: string) => ({ authorization: `Bearer ${bearer}` });
 
-  const createParent = async (bearer: string, fullName = 'Lakshmi Iyer'): Promise<string> => {
+  const createPatient = async (
+    bearer: string,
+    subject: 'me' | 'someone_else' = 'someone_else',
+    fullName = 'Lakshmi Iyer',
+  ): Promise<string> => {
     const response = await app.inject({
       method: 'POST',
-      url: '/v1/parents',
+      url: '/v1/patients',
       headers: as(bearer),
-      payload: { fullName, relationship: 'mother', city: 'Chennai' },
+      payload: { fullName, relationship: 'mother', city: 'Chennai', subject },
     });
-    return (JSON.parse(response.body) as { parent: { parentId: string } }).parent.parentId;
+    return (JSON.parse(response.body) as { patient: { patientId: string } }).patient.patientId;
   };
 
   const createDocument = async (
     bearer: string,
-    parentId: string,
+    patientId: string,
     pageCount = 1,
   ): Promise<string> => {
     const response = await app.inject({
       method: 'POST',
-      url: '/v1/documents',
+      url: `/v1/patients/${patientId}/documents`,
       headers: as(bearer),
       payload: {
-        parentId,
         title: 'Diabetes panel',
         category: 'lab_report',
         documentDate: '2026-03-14',
@@ -106,6 +116,43 @@ describe.skipIf(!up)('the /v1 API', () => {
       },
     });
     return (JSON.parse(response.body) as { document: { documentId: string } }).document.documentId;
+  };
+
+  interface Upload {
+    page: number;
+    key: string;
+    url: string;
+    headers: Record<string, string>;
+  }
+
+  const presign = async (
+    bearer: string,
+    patientId: string,
+    documentId: string,
+    pageCount: number,
+  ): Promise<Upload[]> => {
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v1/patients/${patientId}/documents/${documentId}/uploads`,
+      headers: as(bearer),
+      payload: {
+        pages: Array.from({ length: pageCount }, (_, index) => ({
+          page: index + 1,
+          contentType: 'image/jpeg' as const,
+        })),
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    return (JSON.parse(response.body) as { uploads: Upload[] }).uploads;
+  };
+
+  const putPage = async (upload: Upload): Promise<void> => {
+    const response = await fetch(upload.url, {
+      method: 'PUT',
+      headers: upload.headers,
+      body: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
+    });
+    expect(response.ok).toBe(true);
   };
 
   /**
@@ -120,14 +167,7 @@ describe.skipIf(!up)('the /v1 API', () => {
     const routes: { method: string; url: string }[] = [];
 
     beforeAll(async () => {
-      const collector = buildApp({
-        stack,
-        identity,
-        repository: createRecordRepository(stack),
-        objects,
-        queue: createJobQueue(stack),
-        logStream: silent(),
-      });
+      const collector = buildTestApp();
       collector.addHook('onRoute', (route) => {
         if (!route.url.startsWith('/v1')) return;
         const methods = Array.isArray(route.method) ? route.method : [route.method];
@@ -140,7 +180,7 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
 
     it('is registered, and there are several', () => {
-      expect(routes.length).toBeGreaterThanOrEqual(9);
+      expect(routes.length).toBeGreaterThanOrEqual(12);
     });
 
     it('refuses a request with no token', async () => {
@@ -168,17 +208,8 @@ describe.skipIf(!up)('the /v1 API', () => {
    * would only be proving that the routes which *do* have a preHandler have one.
    */
   describe('the boot-time guard', () => {
-    const buildWith = async (
-      register: (app: FastifyInstance) => void,
-    ): Promise<Error | null> => {
-      const candidate = buildApp({
-        stack,
-        identity,
-        repository: createRecordRepository(stack),
-        objects,
-        queue: createJobQueue(stack),
-        logStream: silent(),
-      });
+    const buildWith = async (register: (app: FastifyInstance) => void): Promise<Error | null> => {
+      const candidate = buildTestApp();
 
       try {
         // The guard is installed synchronously, so an offending route throws
@@ -216,7 +247,9 @@ describe.skipIf(!up)('the /v1 API', () => {
 
     it('accepts a /v1 route that declares it', async () => {
       const error = await buildWith((candidate) => {
-        candidate.get('/v1/fine', { preHandler: candidate.authenticate }, async () => ({ ok: true }));
+        candidate.get('/v1/fine', { preHandler: candidate.authenticate }, async () => ({
+          ok: true,
+        }));
       });
 
       expect(error).toBeNull();
@@ -231,31 +264,52 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
   });
 
-  describe('parents', () => {
+  describe('patients', () => {
     it('creates one and reads it back', async () => {
-      const parentId = await createParent(aliceToken);
+      const patientId = await createPatient(aliceToken);
 
       const response = await app.inject({
         method: 'GET',
-        url: `/v1/parents/${parentId}`,
+        url: `/v1/patients/${patientId}`,
         headers: as(aliceToken),
       });
 
       expect(response.statusCode).toBe(200);
-      expect(JSON.parse(response.body)).toMatchObject({ parent: { fullName: 'Lakshmi Iyer' } });
+      expect(JSON.parse(response.body)).toMatchObject({
+        patient: { fullName: 'Lakshmi Iyer' },
+        role: 'manager',
+      });
     });
 
-    it('ignores an owner the client tries to supply', async () => {
+    it('gives the creator the self grant when the record is their own', async () => {
+      const patientId = await createPatient(aliceToken, 'me', 'Alice Herself');
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/patients/${patientId}`,
+        headers: as(aliceToken),
+      });
+
+      expect(JSON.parse(response.body)).toMatchObject({ role: 'self' });
+    });
+
+    /**
+     * Nothing a client sends can decide whose record this is. The grant is
+     * written from the verified token subject, and only from that.
+     */
+    it('ignores an account the client tries to supply', async () => {
       const response = await app.inject({
         method: 'POST',
-        url: '/v1/parents',
+        url: '/v1/patients',
         headers: as(aliceToken),
         payload: {
           fullName: 'Planted',
           relationship: 'mother',
-          // None of these are read. The owner comes from the token.
-          ownerId: 'owner_somebody_else',
-          PK: 'USER#owner_somebody_else',
+          subject: 'someone_else',
+          // None of these are read.
+          accountId: 'acc_somebody_else',
+          ownerId: 'acc_somebody_else',
+          PK: 'PATIENT#planted',
         },
       });
 
@@ -263,55 +317,21 @@ describe.skipIf(!up)('the /v1 API', () => {
 
       const bobsList = await app.inject({
         method: 'GET',
-        url: '/v1/parents',
+        url: '/v1/patients',
         headers: as(bobToken),
       });
-      const names = (JSON.parse(bobsList.body) as { parents: { fullName: string }[] }).parents.map(
-        (parent) => parent.fullName,
-      );
+      const names = (
+        JSON.parse(bobsList.body) as { patients: { patient: { fullName: string } }[] }
+      ).patients.map((entry) => entry.patient.fullName);
       expect(names).not.toContain('Planted');
-    });
-
-    it('patches without blanking fields that were not sent', async () => {
-      const parentId = await createParent(aliceToken);
-
-      await app.inject({
-        method: 'PATCH',
-        url: `/v1/parents/${parentId}`,
-        headers: as(aliceToken),
-        payload: { city: 'Madurai' },
-      });
-
-      const response = await app.inject({
-        method: 'GET',
-        url: `/v1/parents/${parentId}`,
-        headers: as(aliceToken),
-      });
-      expect(JSON.parse(response.body)).toMatchObject({
-        parent: { city: 'Madurai', fullName: 'Lakshmi Iyer', relationship: 'mother' },
-      });
-    });
-
-    it('refuses to delete somebody who still has documents', async () => {
-      const parentId = await createParent(aliceToken);
-      await createDocument(aliceToken, parentId);
-
-      const response = await app.inject({
-        method: 'DELETE',
-        url: `/v1/parents/${parentId}`,
-        headers: as(aliceToken),
-      });
-
-      expect(response.statusCode).toBe(409);
-      expect(JSON.parse(response.body)).toMatchObject({ code: 'parent_has_documents' });
     });
 
     it('rejects a draft with no name', async () => {
       const response = await app.inject({
         method: 'POST',
-        url: '/v1/parents',
+        url: '/v1/patients',
         headers: as(aliceToken),
-        payload: { relationship: 'mother' },
+        payload: { relationship: 'mother', subject: 'me' },
       });
 
       expect(response.statusCode).toBe(400);
@@ -320,46 +340,24 @@ describe.skipIf(!up)('the /v1 API', () => {
 
   describe('the upload flow', () => {
     it('carries a document from record to queued job', async () => {
-      const parentId = await createParent(aliceToken);
-      const documentId = await createDocument(aliceToken, parentId, 2);
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 2);
 
       // Awaiting upload until the pages are actually there.
       const before = await app.inject({
         method: 'GET',
-        url: `/v1/documents/${documentId}/processing`,
+        url: `/v1/patients/${patientId}/documents/${documentId}/processing`,
         headers: as(aliceToken),
       });
       expect(JSON.parse(before.body)).toMatchObject({ processing: { status: 'awaiting_upload' } });
 
-      const presigned = await app.inject({
-        method: 'POST',
-        url: `/v1/documents/${documentId}/uploads`,
-        headers: as(aliceToken),
-        payload: {
-          pages: [
-            { page: 1, contentType: 'image/jpeg' },
-            { page: 2, contentType: 'image/jpeg' },
-          ],
-        },
-      });
-      expect(presigned.statusCode).toBe(200);
-
-      const { uploads } = JSON.parse(presigned.body) as {
-        uploads: { page: number; url: string; headers: Record<string, string> }[];
-      };
-
-      for (const upload of uploads) {
-        const put = await fetch(upload.url, {
-          method: 'PUT',
-          headers: upload.headers,
-          body: new Uint8Array([0xff, 0xd8, 0xff, 0xe0]),
-        });
-        expect(put.ok).toBe(true);
+      for (const upload of await presign(aliceToken, patientId, documentId, 2)) {
+        await putPage(upload);
       }
 
       const completed = await app.inject({
         method: 'POST',
-        url: `/v1/documents/${documentId}/uploads/complete`,
+        url: `/v1/patients/${patientId}/documents/${documentId}/uploads/complete`,
         headers: as(aliceToken),
       });
 
@@ -377,33 +375,15 @@ describe.skipIf(!up)('the /v1 API', () => {
      * worse than a failed upload.
      */
     it('refuses to queue a document whose pages did not all arrive', async () => {
-      const parentId = await createParent(aliceToken);
-      const documentId = await createDocument(aliceToken, parentId, 3);
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 3);
 
-      const presigned = await app.inject({
-        method: 'POST',
-        url: `/v1/documents/${documentId}/uploads`,
-        headers: as(aliceToken),
-        payload: {
-          pages: [1, 2, 3].map((page) => ({ page, contentType: 'image/jpeg' as const })),
-        },
-      });
-      const { uploads } = JSON.parse(presigned.body) as {
-        uploads: { page: number; url: string; headers: Record<string, string> }[];
-      };
-
-      // Only the first two.
-      for (const upload of uploads.slice(0, 2)) {
-        await fetch(upload.url, {
-          method: 'PUT',
-          headers: upload.headers,
-          body: new Uint8Array([1]),
-        });
-      }
+      const uploads = await presign(aliceToken, patientId, documentId, 3);
+      for (const upload of uploads.slice(0, 2)) await putPage(upload);
 
       const completed = await app.inject({
         method: 'POST',
-        url: `/v1/documents/${documentId}/uploads/complete`,
+        url: `/v1/patients/${patientId}/documents/${documentId}/uploads/complete`,
         headers: as(aliceToken),
       });
 
@@ -415,33 +395,16 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
 
     it('does not queue the same document twice when the phone retries', async () => {
-      const parentId = await createParent(aliceToken);
-      const documentId = await createDocument(aliceToken, parentId, 1);
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 1);
 
-      const presigned = await app.inject({
-        method: 'POST',
-        url: `/v1/documents/${documentId}/uploads`,
-        headers: as(aliceToken),
-        payload: { pages: [{ page: 1, contentType: 'image/jpeg' }] },
-      });
-      const { uploads } = JSON.parse(presigned.body) as {
-        uploads: { url: string; headers: Record<string, string> }[];
-      };
-      await fetch(uploads[0]!.url, {
-        method: 'PUT',
-        headers: uploads[0]!.headers,
-        body: new Uint8Array([1]),
-      });
+      for (const upload of await presign(aliceToken, patientId, documentId, 1)) {
+        await putPage(upload);
+      }
 
-      const complete = () =>
-        app.inject({
-          method: 'POST',
-          url: `/v1/documents/${documentId}/uploads/complete`,
-          headers: as(aliceToken),
-        });
-
-      const first = await complete();
-      const second = await complete();
+      const url = `/v1/patients/${patientId}/documents/${documentId}/uploads/complete`;
+      const first = await app.inject({ method: 'POST', url, headers: as(aliceToken) });
+      const second = await app.inject({ method: 'POST', url, headers: as(aliceToken) });
 
       expect(first.statusCode).toBe(202);
       expect(JSON.parse(first.body)).toMatchObject({ alreadyQueued: false });
@@ -450,12 +413,12 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
 
     it('refuses a page count that does not match the document', async () => {
-      const parentId = await createParent(aliceToken);
-      const documentId = await createDocument(aliceToken, parentId, 2);
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 2);
 
       const response = await app.inject({
         method: 'POST',
-        url: `/v1/documents/${documentId}/uploads`,
+        url: `/v1/patients/${patientId}/documents/${documentId}/uploads`,
         headers: as(aliceToken),
         payload: { pages: [{ page: 1, contentType: 'image/jpeg' }] },
       });
@@ -464,12 +427,12 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
 
     it('refuses a content type the pipeline cannot read', async () => {
-      const parentId = await createParent(aliceToken);
-      const documentId = await createDocument(aliceToken, parentId, 1);
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 1);
 
       const response = await app.inject({
         method: 'POST',
-        url: `/v1/documents/${documentId}/uploads`,
+        url: `/v1/patients/${patientId}/documents/${documentId}/uploads`,
         headers: as(aliceToken),
         payload: { pages: [{ page: 1, contentType: 'application/zip' }] },
       });
@@ -477,15 +440,104 @@ describe.skipIf(!up)('the /v1 API', () => {
       expect(response.statusCode).toBe(400);
     });
 
-    it('refuses to file a document against a parent that is not the caller’s', async () => {
-      const bobsParent = await createParent(bobToken, 'Bob’s Mother');
+    it('files the document under the patient, not under whoever uploaded it', async () => {
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId, 1);
+
+      const [upload] = await presign(aliceToken, patientId, documentId, 1);
+
+      // The object key is the record's, so revoking a helper moves no bytes and
+      // deleting the record is one prefix.
+      expect(upload?.key).toContain(`patients/${patientId}/`);
+      expect(upload?.key).not.toContain('owners/');
+    });
+  });
+
+  describe('one caller reaching for another’s records', () => {
+    it('cannot read a record it holds no grant on', async () => {
+      const patientId = await createPatient(aliceToken);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/patients/${patientId}`,
+        headers: as(bobToken),
+      });
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('says the same thing for a record that does not exist at all', async () => {
+      const patientId = await createPatient(aliceToken);
+
+      const real = await app.inject({
+        method: 'GET',
+        url: `/v1/patients/${patientId}`,
+        headers: as(bobToken),
+      });
+      const invented = await app.inject({
+        method: 'GET',
+        url: '/v1/patients/pat_does-not-exist',
+        headers: as(bobToken),
+      });
+
+      expect(real.statusCode).toBe(invented.statusCode);
+      expect(real.body).toBe(invented.body);
+    });
+
+    it('cannot list another account’s documents', async () => {
+      const patientId = await createPatient(aliceToken);
+      await createDocument(aliceToken, patientId);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v1/patients/${patientId}/documents`,
+        headers: as(bobToken),
+      });
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    it('cannot delete another account’s document', async () => {
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId);
+
+      const response = await app.inject({
+        method: 'DELETE',
+        url: `/v1/patients/${patientId}/documents/${documentId}`,
+        headers: as(bobToken),
+      });
+
+      expect(response.statusCode).toBe(404);
+    });
+
+    /**
+     * The one that matters most in this file. A presigned URL outlives the
+     * request that issued it, so signing one for a caller with no grant hands
+     * them a working credential regardless of what the response body said.
+     */
+    it('cannot presign an upload into another account’s document', async () => {
+      const patientId = await createPatient(aliceToken);
+      const documentId = await createDocument(aliceToken, patientId);
 
       const response = await app.inject({
         method: 'POST',
-        url: '/v1/documents',
-        headers: as(aliceToken),
+        url: `/v1/patients/${patientId}/documents/${documentId}/uploads`,
+        headers: as(bobToken),
+        payload: { pages: [{ page: 1, contentType: 'image/jpeg' }] },
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.body).not.toContain('http');
+    });
+
+    it('cannot file a document against a record it does not hold', async () => {
+      const patientId = await createPatient(aliceToken);
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/v1/patients/${patientId}/documents`,
+        headers: as(bobToken),
         payload: {
-          parentId: bobsParent,
           title: 'Planted',
           category: 'lab_report',
           documentDate: '2026-03-14',
@@ -497,77 +549,101 @@ describe.skipIf(!up)('the /v1 API', () => {
     });
   });
 
-  describe('one caller reaching for another’s records', () => {
-    let aliceParent: string;
-    let aliceDocument: string;
+  describe('a read-only helper', () => {
+    const inviteAndAccept = async (
+      patientId: string,
+      role: 'contributor' | 'viewer',
+    ): Promise<void> => {
+      const invitation = await app.inject({
+        method: 'POST',
+        url: `/v1/patients/${patientId}/invitations`,
+        headers: as(aliceToken),
+        payload: { role },
+      });
+      expect(invitation.statusCode).toBe(201);
 
-    beforeAll(async () => {
-      aliceParent = await createParent(aliceToken);
-      aliceDocument = await createDocument(aliceToken, aliceParent);
-    });
+      const accepted = await app.inject({
+        method: 'POST',
+        url: '/v1/invitations/accept',
+        headers: as(bobToken),
+        payload: { token: (JSON.parse(invitation.body) as { token: string }).token },
+      });
+      expect(accepted.statusCode).toBe(200);
+    };
 
-    it.each([
-      ['a parent', () => `/v1/parents/${aliceParent}`],
-      ['a document', () => `/v1/documents/${aliceDocument}`],
-      ['processing state', () => `/v1/documents/${aliceDocument}/processing`],
-      ['a summary', () => `/v1/documents/${aliceDocument}/summary`],
-    ])('answers 404 for %s belonging to somebody else', async (_label, url) => {
-      const response = await app.inject({ method: 'GET', url: url(), headers: as(bobToken) });
+    it('can read the record but cannot add a document to it', async () => {
+      const patientId = await createPatient(aliceToken);
+      await inviteAndAccept(patientId, 'viewer');
 
-      expect(response.statusCode).toBe(404);
-    });
-
-    it('says the same thing for a record that does not exist at all', async () => {
-      const missing = await app.inject({
+      const read = await app.inject({
         method: 'GET',
-        url: '/v1/documents/doc_does_not_exist',
+        url: `/v1/patients/${patientId}`,
         headers: as(bobToken),
       });
-      const someoneElses = await app.inject({
-        method: 'GET',
-        url: `/v1/documents/${aliceDocument}`,
-        headers: as(bobToken),
-      });
+      expect(read.statusCode).toBe(200);
 
-      // Identical, on purpose. A different answer would turn any endpoint
-      // taking an id into a way to test whether that id exists in somebody
-      // else's records.
-      expect(someoneElses.statusCode).toBe(missing.statusCode);
-      expect(someoneElses.body).toBe(missing.body);
+      const write = await app.inject({
+        method: 'POST',
+        url: `/v1/patients/${patientId}/documents`,
+        headers: as(bobToken),
+        payload: {
+          title: 'Planted',
+          category: 'lab_report',
+          documentDate: '2026-03-14',
+          pageCount: 1,
+        },
+      });
+      // 403 rather than 404: bob can see this record, so what he may not do is
+      // the honest answer.
+      expect(write.statusCode).toBe(403);
     });
 
-    it('cannot delete another caller’s document', async () => {
-      const response = await app.inject({
+    it('can add a document as a contributor, but not delete one', async () => {
+      const patientId = await createPatient(aliceToken);
+      await inviteAndAccept(patientId, 'contributor');
+
+      const documentId = await createDocument(bobToken, patientId);
+      expect(documentId).toBeTruthy();
+
+      const removal = await app.inject({
         method: 'DELETE',
-        url: `/v1/documents/${aliceDocument}`,
+        url: `/v1/patients/${patientId}/documents/${documentId}`,
         headers: as(bobToken),
       });
+      expect(removal.statusCode).toBe(403);
+    });
 
-      expect(response.statusCode).toBe(404);
+    it('loses access the moment the grant is revoked', async () => {
+      const patientId = await createPatient(aliceToken);
+      await inviteAndAccept(patientId, 'contributor');
 
-      const stillThere = await app.inject({
-        method: 'GET',
-        url: `/v1/documents/${aliceDocument}`,
+      const bobAccount = (
+        JSON.parse(
+          (
+            await app.inject({
+              method: 'GET',
+              url: `/v1/patients/${patientId}/grants`,
+              headers: as(aliceToken),
+            })
+          ).body,
+        ) as { grants: { accountId: string; role: string }[] }
+      ).grants.find((grant) => grant.role === 'contributor')?.accountId;
+
+      const removal = await app.inject({
+        method: 'DELETE',
+        url: `/v1/patients/${patientId}/grants/${bobAccount}`,
         headers: as(aliceToken),
       });
-      expect(stillThere.statusCode).toBe(200);
-    });
+      expect(removal.statusCode).toBe(204);
 
-    it('cannot presign an upload into another caller’s document', async () => {
-      const response = await app.inject({
-        method: 'POST',
-        url: `/v1/documents/${aliceDocument}/uploads`,
+      const after = await app.inject({
+        method: 'GET',
+        url: `/v1/patients/${patientId}`,
+        // The same token as before: revocation must not depend on the client
+        // discarding anything.
         headers: as(bobToken),
-        payload: { pages: [{ page: 1, contentType: 'image/jpeg' }] },
       });
-
-      expect(response.statusCode).toBe(404);
+      expect(after.statusCode).toBe(404);
     });
-  });
-});
-
-describe.skipIf(up)('the /v1 API (stack not running)', () => {
-  it('is skipped — start it with: npm run stack:up', () => {
-    expect(up).toBe(false);
   });
 });

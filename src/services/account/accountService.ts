@@ -53,9 +53,9 @@ export const accountService = {
    * the summary item, not just the document item — an orphaned summary still
    * contains clinical text.
    */
-  async deleteDocument(documentId: string): Promise<void> {
+  async deleteDocument(parentId: string, documentId: string): Promise<void> {
     if (isBackendEnabled()) {
-      await apiClient.delete(endpoints.documents.remove(documentId));
+      await apiClient.delete(endpoints.documents.remove(parentId, documentId));
       return;
     }
     // Local-only mode: the store owns removal; nothing to call.

@@ -90,7 +90,7 @@ export const runDocumentPipeline = async (input: RunPipelineInput): Promise<Pipe
       ...(signal === undefined ? {} : { signal }),
     });
 
-    await uploadService.completeUpload(document.id, result.objectKeys);
+    await uploadService.completeUpload(document.parentId, document.id, result.objectKeys);
 
     const summary = await summaryService.processDocument(
       document,

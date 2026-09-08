@@ -36,7 +36,7 @@ describe.skipIf(!up)('the local stack', () => {
   const queue = createJobQueue(config);
 
   // Unique per run, so a re-run is never confused by what the last one left.
-  const ownerId = `owner_${Date.now().toString(36)}`;
+  const patientId = `owner_${Date.now().toString(36)}`;
   const documentId = 'doc_local_stack';
   const written: string[] = [];
 
@@ -50,7 +50,7 @@ describe.skipIf(!up)('the local stack', () => {
 
   describe('object storage', () => {
     it('round-trips a page through the store', async () => {
-      const key = pageKey({ ownerId, documentId, page: 1 });
+      const key = pageKey({ patientId, documentId, page: 1 });
       written.push(key);
       const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]); // "%PDF"
 
@@ -61,11 +61,11 @@ describe.skipIf(!up)('the local stack', () => {
     });
 
     it('reports a missing object as absent rather than throwing', async () => {
-      expect(await store.exists(pageKey({ ownerId, documentId, page: 99 }))).toBe(false);
+      expect(await store.exists(pageKey({ patientId, documentId, page: 99 }))).toBe(false);
     });
 
     it('deletes a page', async () => {
-      const key = pageKey({ ownerId, documentId: 'doc_to_delete', page: 1 });
+      const key = pageKey({ patientId, documentId: 'doc_to_delete', page: 1 });
       await store.put(key, new Uint8Array([1, 2, 3]), 'image/jpeg');
 
       await store.delete(key);
@@ -74,26 +74,26 @@ describe.skipIf(!up)('the local stack', () => {
     });
 
     it('groups every object under its owner, so erasure is a prefix', () => {
-      const key = pageKey({ ownerId, documentId, page: 2 });
-      expect(key.startsWith(`owners/${ownerId}/`)).toBe(true);
+      const key = pageKey({ patientId, documentId, page: 2 });
+      expect(key.startsWith(`owners/${patientId}/`)).toBe(true);
     });
 
     it('pads page numbers so a listing sorts in reading order', () => {
-      const keys = [9, 10, 2].map((page) => pageKey({ ownerId, documentId, page }));
+      const keys = [9, 10, 2].map((page) => pageKey({ patientId, documentId, page }));
       expect([...keys].sort()).toEqual([
-        pageKey({ ownerId, documentId, page: 2 }),
-        pageKey({ ownerId, documentId, page: 9 }),
-        pageKey({ ownerId, documentId, page: 10 }),
+        pageKey({ patientId, documentId, page: 2 }),
+        pageKey({ patientId, documentId, page: 9 }),
+        pageKey({ patientId, documentId, page: 10 }),
       ]);
     });
   });
 
   describe('presigned upload', () => {
     it('lets a client PUT a page without holding any credential', async () => {
-      const key = pageKey({ ownerId, documentId, page: 3 });
+      const key = pageKey({ patientId, documentId, page: 3 });
       written.push(key);
 
-      const presigned = await store.presignUpload({ ownerId, documentId, page: 3 }, 'image/jpeg');
+      const presigned = await store.presignUpload({ patientId, documentId, page: 3 }, 'image/jpeg');
       const body = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]); // JPEG magic
 
       const response = await fetch(presigned.url, {
@@ -107,7 +107,7 @@ describe.skipIf(!up)('the local stack', () => {
     });
 
     it('signs the content type, so a mislabelled upload is refused', async () => {
-      const presigned = await store.presignUpload({ ownerId, documentId, page: 4 }, 'image/jpeg');
+      const presigned = await store.presignUpload({ patientId, documentId, page: 4 }, 'image/jpeg');
 
       const response = await fetch(presigned.url, {
         method: 'PUT',
@@ -119,7 +119,7 @@ describe.skipIf(!up)('the local stack', () => {
     });
 
     it('signs one key only, so the URL cannot be pointed at another document', async () => {
-      const presigned = await store.presignUpload({ ownerId, documentId, page: 5 }, 'image/jpeg');
+      const presigned = await store.presignUpload({ patientId, documentId, page: 5 }, 'image/jpeg');
       const elsewhere = presigned.url.replace(documentId, 'doc_someone_else');
 
       const response = await fetch(elsewhere, {
@@ -132,7 +132,7 @@ describe.skipIf(!up)('the local stack', () => {
     });
 
     it('expires, and says by when', async () => {
-      const presigned = await store.presignUpload({ ownerId, documentId, page: 6 }, 'image/jpeg');
+      const presigned = await store.presignUpload({ patientId, documentId, page: 6 }, 'image/jpeg');
 
       expect(presigned.expiresInSeconds).toBe(config.presignTtlSeconds);
       expect(presigned.expiresInSeconds).toBeLessThanOrEqual(3600);
@@ -142,14 +142,14 @@ describe.skipIf(!up)('the local stack', () => {
 
   describe('the processing queue', () => {
     const job: ProcessingJob = {
-      ownerId,
+      patientId,
       documentId,
       pageCount: 2,
       // Unique per run. The queue is shared with every other suite touching the
       // local stack — the `/v1` tests enqueue real jobs onto it — so a test that
       // assumed the next message was its own would fail whenever the files ran
       // together. It did, which is how this got written properly.
-      attemptToken: `attempt_${ownerId}`,
+      attemptToken: `attempt_${patientId}`,
     };
 
     /** Reads until it finds our message, acknowledging what it takes. */

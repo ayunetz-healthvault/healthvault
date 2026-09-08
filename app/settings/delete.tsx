@@ -50,9 +50,11 @@ export default function DeleteDataScreen(): React.JSX.Element {
   const pendingDocument = vault.documents.find((doc) => doc.id === pendingDocumentId);
 
   const handleDeleteDocument = async (): Promise<void> => {
-    if (!pendingDocumentId) return;
+    if (!pendingDocumentId || pendingDocument === undefined) return;
     setBusy(true);
-    await accountService.deleteDocument(pendingDocumentId);
+    // The record it belongs to, not the account deleting it: the backend checks
+    // the grant on that record before removing anything. See ADR-005.
+    await accountService.deleteDocument(pendingDocument.parentId, pendingDocumentId);
     removeDocument(pendingDocumentId);
     setBusy(false);
     setPendingDocumentId(null);

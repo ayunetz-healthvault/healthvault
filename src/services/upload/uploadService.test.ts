@@ -123,7 +123,7 @@ describe('uploadDocument', () => {
 
 describe('completeUpload', () => {
   it('returns a job id derived from the document', async () => {
-    await expect(uploadService.completeUpload('doc_1', ['key-1'])).resolves.toEqual({
+    await expect(uploadService.completeUpload('par_1', 'doc_1', ['key-1'])).resolves.toEqual({
       jobId: 'job_doc_1',
     });
   });

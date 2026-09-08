@@ -1,16 +1,14 @@
-import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
 
 import type { AccessRepository } from '../../services/access/AccessRepository.js';
 import {
-  allows,
   canGrantRole,
   canRevoke,
   GRANTABLE_ROLES,
-  type Action,
-  type Grant,
 } from '../../services/access/policy.js';
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
+import { requireAccess } from './requireAccess.js';
 import { callerOf, notFound } from './shared.js';
 
 /**
@@ -73,40 +71,6 @@ const forbidden = {
   code: 'forbidden' as const,
   message: 'You do not have permission to do that.',
   retryable: false,
-};
-
-/**
- * A grant that permits `action`, or a reply already sent.
- *
- * Two different refusals, and the difference matters:
- *
- * - **No grant at all → 404.** The caller learns nothing about whether the
- *   patient exists. Anything else makes this a membership oracle.
- * - **A grant that does not permit this action → 403.** The caller already
- *   knows the record exists — they can read it — so hiding it would only be
- *   confusing. What they may not do is the honest answer.
- */
-const requireAccess = async (
-  request: FastifyRequest,
-  reply: FastifyReply,
-  access: AccessRepository,
-  patientId: string,
-  action: Action,
-): Promise<Grant | null> => {
-  const accountId = callerOf(request).ownerId;
-  const grant = await access.getGrant(patientId, accountId);
-
-  if (grant === null || grant.status !== 'active') {
-    await reply.code(404).send(notFound('patient'));
-    return null;
-  }
-
-  if (!allows(grant, action)) {
-    await reply.code(403).send(forbidden);
-    return null;
-  }
-
-  return grant;
 };
 
 /** Never carries the plaintext, so a hint cannot be turned back into an address. */
