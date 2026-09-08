@@ -3,6 +3,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { loadConfig, type AppConfig } from './config/env.js';
 import { loadIdentityConfig, type IdentityConfig } from './config/identity.js';
+import { assertSafeToStart } from './config/productionSafety.js';
 import { loadStackConfig, type StackConfig } from './config/stack.js';
 import { installAuthentication } from './routes/authentication.js';
 import { healthRoutes } from './routes/health.js';
@@ -71,6 +72,16 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
   const config = options.config ?? loadConfig();
   const stack = options.stack ?? loadStackConfig();
   const identity = options.identity ?? loadIdentityConfig(stack.name, stack.region);
+
+  /**
+   * Before anything is built.
+   *
+   * A configuration that would serve mock summaries as real ones, or point
+   * production at a laptop's containers, must not produce a running service —
+   * it would look healthy while being wrong in a way nobody notices until
+   * somebody acts on the output.
+   */
+  assertSafeToStart({ config, stack });
   const processor =
     options.processor ??
     new DocumentProcessingOrchestrator({
