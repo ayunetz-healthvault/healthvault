@@ -35,8 +35,8 @@ a defect in the checked-out code.
 
 | Limitation | Effect | How it was established |
 | --- | --- | --- |
-| Docker image registry unreachable (`production.cloudfront.docker.com` → 403 through the session proxy) | `npm run stack:up` starts the daemon but pulls no images, so MinIO / DynamoDB Local / ElasticMQ never run. The 72 stack-dependent backend tests stay skipped. | `npm run stack:up`; `docker ps` empty |
-| Tesseract language data unreachable (`cdn.jsdelivr.net` and `github.com` → 403 through the session proxy) | `backend/test/integration/tesseractOcr.test.ts` (6 tests) fails on a network fetch, not on OCR behaviour. The repository's own `SKIP_OCR_TESTS=1` escape hatch is used for a clean gate. | `curl` to both hosts; failure text names the fetch |
+| Docker image registry unreachable (`production.cloudfront.docker.com` → 403 through the session proxy) | `npm run stack:up` starts the daemon but pulls no images, so MinIO / DynamoDB Local / ElasticMQ never run. The 92 stack-dependent backend tests stay skipped. | `docker compose pull` → `Forbidden` on the layer fetch; proxy status reports `connect_rejected` for that host. Re-checked at the end of this work; unchanged |
+| Tesseract language data unreachable (`cdn.jsdelivr.net` → 403 through the session proxy) | `backend/test/integration/tesseractOcr.test.ts` (6 tests) fails on a network fetch, not on OCR behaviour. The repository's own `SKIP_OCR_TESTS=1` escape hatch is used for a clean gate. | The suite's own error names the fetch: `eng.traineddata.gz. Response code: 403`. Re-checked at the end of this work; unchanged |
 | No physical device, simulator or emulator | Native screenshots, native encryption and device calendar writes cannot be captured here. Web preview is not a substitute and is not claimed as one. | No Android/iOS toolchain in the container |
 | No AWS account, Cognito user pool or Sarvam credential | Live auth, live provider calls and IAM/residency claims cannot be tested. | No credentials present; none requested |
 
@@ -470,50 +470,108 @@ does not have. None is marked complete.
 
 ### Gates actually run, at the end of this work
 
+Commit `a999da8`, 2026-09-08.
+
 | Command | Result |
 | --- | --- |
-| `npm run verify` | **pass** — typecheck, lint, **705 tests / 43 suites** (371 at baseline) |
-| `SKIP_OCR_TESTS=1 npm run backend:verify` | **pass** — **523 passed, 92 skipped** (410/79 at baseline) |
-| `npm run backend:verify` (no skip) | **fail** — the same 6 `tesseractOcr` network fetches as at baseline, unchanged and environmental |
+| `npx tsc --noEmit` (app) | **pass**, exit 0 |
+| `npx eslint .` (app) | **pass**, exit 0 |
+| `npx jest` (app) | **pass** — **844 tests / 55 suites** (371 at baseline) |
+| `npx tsc --noEmit` (backend) | **pass**, exit 0 |
+| `npx eslint .` (backend) | **pass**, exit 0 |
+| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **590 passed, 92 skipped** (410 / 79 at baseline) |
+| `npx vitest run` (backend, no skip) | **fail** — 6 `tesseractOcr` tests, unchanged from baseline and environmental |
+
+### The two blocked gates, with their actual errors
+
+Both were re-checked at the end of this work. Neither has moved, and neither is
+a defect in this branch.
+
+**The local stack cannot start.** `docker compose pull` fails fetching image
+layers:
+
+```
+failed to copy: httpReadSeeker: failed open: failed to do request:
+Get "https://production.cloudfront.docker.com/registry-v2/.../data?...": Forbidden
+```
+
+The session's network policy confirms it: `production.cloudfront.docker.com:443
+-> connect_rejected (gateway answered 403 to CONNECT)`. DynamoDB Local, MinIO
+and ElasticMQ therefore never come up.
+
+**OCR language data cannot be downloaded.** Running the OCR suite without
+`SKIP_OCR_TESTS=1` produces:
+
+```
+Error: Network error while fetching
+https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng/4.0.0_best_int/eng.traineddata.gz.
+Response code: 403
+```
+
+Six tests then time out at 30s each. The repository's own `SKIP_OCR_TESTS`
+switch exists for exactly this; it is recorded here rather than hidden.
 
 ### What the 92 skipped backend tests are
 
-Not incidental. They include every test that needs the local stack: the
-`/v1` API end to end, the record repository's isolation tests, the ADR-005
-concurrency and migration tests, and PDF processing. **The Docker image
-registry is unreachable in this session, so the stack cannot start.** These
-tests are written and unrun, and the conditional writes they cover are the one
-part of KOO-03 a fake cannot demonstrate.
+Not incidental. They are every test that needs the local stack: the `/v1` API
+end to end, the record repository's tenant-isolation tests, the ADR-005
+conditional-write and migration tests, and PDF processing. They are **written
+and unrun**, and the conditional writes they cover are the one part of KOO-03
+that a fake cannot demonstrate.
+
+### The synthetic two-account journey
+
+The reviewer asked for a demonstration that a second account sees the right
+thing. What exists, and what it is worth:
+
+| Step | Where it is proven | What it does not prove |
+| --- | --- | --- |
+| Second account pulls queued, failed, review-needed and completed reports and sees each state correctly | `src/services/sync/pullService.test.ts` — a synthetic server, the real `pullRecords`, the real merge, the real vault store | It ran against a fake `fetch`, not against the Fastify app |
+| The completed summary can actually be opened | same file — `selectSummaryForDocument` returns the pulled summary | as above |
+| Refresh and relaunch do not duplicate or lose records | `mergeDocuments.test.ts`, `pullService.test.ts` | as above |
+| Revocation removes the record, its documents and its summaries from the second device | `pullService.test.ts` | as above |
+| A synthetic report produces a persisted summary only with consent, and none without | `backend/test/integration/consentWiring.test.ts` — the real worker, the real repository port, the same `consentFor` wiring `worker.ts` uses | It used the in-memory repository fake, not DynamoDB Local |
+| Grants, roles and refusals on every `/v1` route | `backend/test/unit/*Routes.test.ts` — the real Fastify app via `app.inject`, real tokens | Storage is the in-memory fake, so conditional writes and key shapes are untested |
+
+**No document has travelled from a camera through upload, a worker, a provider
+and back to a second account's screen.** That needs the local stack at minimum.
+Nothing in the table above substitutes for it, and none of it is offered as a
+substitute.
 
 ### Readiness
 
 | Level | State |
 | --- | --- |
-| **Demo ready** | Yes, for the two shells and the design. The demonstration build seeds fictional records, cannot reach a server, and says so above the fold |
-| **Synthetic cloud pilot ready** | **No.** Requires the local stack and then a cloud environment; neither has been exercised |
+| **Demo ready** | Yes, for both shells and the flows built on the local vault. The demonstration build seeds fictional records, cannot reach a server, and says so above the fold |
+| **Synthetic cloud pilot ready** | **No.** Requires the local stack, then a cloud environment; neither has been exercised |
 | **Real-patient pilot approved** | **No.** Requires everything above plus the privacy, provider, legal and operational gates in `DATA_HANDLING.md`, none of which is closed |
 
-### Journeys, honestly
+## Review round two — what the owner asked for, and what happened
 
-Neither end-to-end journey has been run. The pieces are implemented and unit
-tested; what has *not* happened is a single document travelling from a camera
-through upload, a worker, a provider and back to a second account's screen.
-That needs the local stack at minimum, and no amount of passing unit tests
-substitutes for it.
+Six items on PR #1. Each is recorded here with what changed and what is still
+open.
+
+| # | Item | Outcome |
+| --- | --- | --- |
+| 1 | Consent persisted, versioned, authorised, and wired into the worker | **Fixed.** `CONSENT#<purpose>#<decidedAt>` items, append-only; `GET/POST /v1/patients/:id/consent` and `/consent/history`; new `manage_consent` action held by `self` and `manager` only; a stale notice version is refused with 409; `worker.ts` now passes `patients.listConsent`. 27 tests across `consentRoutes` and `consentWiring` |
+| 2 | Reconciliation inventing document completion | **Fixed.** The list route joins processing state and `hasSummary`; `toAppStatus` writes out every branch; `needs_review` added to the app; completed summaries are fetched during a pull so `ready` means openable. 37 tests across `reconcile`, `mergeDocuments`, `pullService`, `documentListing` |
+| 3 | The parent Today dose flow | **Fixed.** Schedules confirmed by a person, doses from `occurrences.ts`, both answers offered explicitly, undo append-only, the answered dose held on screen. One real defect found by its own test: `dosesPerDayFrom` read "thrice daily" as one dose a day |
+| 4 | Review screen, observations, visit prep, follow-up CRUD | **Fixed.** All four, plus the outbox connected to a sender for the first time. AI proposals open a confirmation and never create anything themselves |
+| 5 | Export and deletion with per-record permissions | **Fixed.** Per-record export naming the role it was produced under; `self`-only record deletion with a typed name; account deletion that refuses to strand a record and names the ones that would be. Two false promises removed from the UI — a seven-day grace period and an emailed download link, neither of which existed |
+| 6 | Evidence gaps | **Partly closed.** Gates re-run and recorded above with the commit SHA; the synthetic two-account journey is proven at the level stated in the table above. The two blocked gates are unchanged, with their actual errors recorded |
 
 ## Resume checkpoint
 
 Next, in order:
 
-1. **Get the local stack running** in an environment with an image registry, and
-   run the four skipped integration suites. They are the highest-value unrun
-   evidence in the repository.
-2. **Wire the parent's Today screen** to `occurrences.ts`, and build the dose
-   controls. The rules are done and tested; the screen is not.
-3. **Rebuild the document review screen** against the correction API.
-4. **Build observation entry and visit preparation screens** over
-   `visitPreparation.ts`.
-5. **Move follow-up CRUD to `/v1`** and wire the calendar mappings into the
-   confirmation flow.
-6. **Build the consent store and the export/deletion endpoints.**
-7. Everything in `DEPLOYMENT.md` § "What is blocked", once there is an account.
+1. **Get the local stack running** in an environment that can reach a container
+   registry, and run the four skipped integration suites. They remain the
+   highest-value unrun evidence in the repository.
+2. **Run the two-account journey against the real stack**, end to end, with a
+   synthetic report going through the worker.
+3. **Send observations, treatments and dose events to `/v1`.** They are stored
+   and shared through no endpoint yet; `mutationSender` refuses them explicitly
+   rather than pretending.
+4. **Write the export to a file on the phone.** The data is assembled and
+   returned; there is nowhere on the device to put it.
+5. Everything in `DEPLOYMENT.md` § "What is blocked", once there is an account.
