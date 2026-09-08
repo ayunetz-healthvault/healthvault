@@ -22,6 +22,7 @@ import {
   patientSummarySk,
   patientConsentSk,
   PATIENT_CONSENT_PREFIX,
+  PATIENT_DELETION_SK,
   PATIENT_PROFILE_SK,
   type AccountId,
   type PatientId,
@@ -89,6 +90,20 @@ export interface AuditEntry {
   readonly at: string;
 }
 
+/**
+ * A record that is in the middle of being erased.
+ *
+ * Durable, because the interesting case is the one where the process running
+ * the erasure dies half way: an in-memory flag would let the next upload write
+ * into a half-emptied record as though nothing had happened.
+ */
+export interface DeletionMarker {
+  readonly patientId: PatientId;
+  /** Who asked. Kept so a resumed erasure can be attributed to its requester. */
+  readonly requestedByAccountId: AccountId;
+  readonly requestedAt: string;
+}
+
 export interface PatientRecordRepository {
   putPatient(patient: PatientRecord): Promise<void>;
   getPatient(patientId: PatientId): Promise<PatientRecord | null>;
@@ -102,13 +117,37 @@ export interface PatientRecordRepository {
    */
   deletePatient(patientId: PatientId): Promise<void>;
   /**
-   * Deletes every item in this record's partition.
+   * Deletes every item in this record's partition, following every page.
    *
-   * Returns what it removed, by kind, so the caller can report an erasure
-   * rather than assert one. Objects in the store are *not* touched here — they
-   * are the caller's to delete, because this port knows nothing about them.
+   * Returns what it removed, so the caller can report an erasure rather than
+   * assert one. Objects in the store are *not* touched here — they are the
+   * caller's to delete, because this port knows nothing about them.
+   *
+   * The deletion marker is the one item left behind: it is what fences writes
+   * while this runs, so removing it is the caller's last act, after the objects
+   * are gone too. A partition larger than one query page is followed to the
+   * end — a single `Query` returns at most 1 MB, and stopping there would
+   * report an erasure that deleted the first page of somebody's record and left
+   * the rest.
    */
   deleteEverythingFor(patientId: PatientId): Promise<{ items: number }>;
+
+  /**
+   * Marks a record as being erased, before anything is actually deleted.
+   *
+   * Every write path checks this. Without it, an upload that lands during the
+   * sweep, or a worker finishing a job it started a minute earlier, writes rows
+   * back into a partition that has just been emptied — and the erasure reports
+   * success while the record quietly refills.
+   *
+   * Idempotent: asking twice keeps the first request's timestamp, because a
+   * resumed deletion is the same deletion.
+   */
+  beginDeletion(marker: DeletionMarker): Promise<DeletionMarker>;
+  /** The marker, or null when this record is not being erased. */
+  getDeletion(patientId: PatientId): Promise<DeletionMarker | null>;
+  /** Removes the marker. The last step of an erasure, never an earlier one. */
+  clearDeletion(patientId: PatientId): Promise<void>;
 
   putDocument(patientId: PatientId, document: DocumentRecord): Promise<void>;
   getDocument(patientId: PatientId, documentId: string): Promise<DocumentRecord | null>;
@@ -191,24 +230,51 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     return stripKeys<T>(response.Item);
   };
 
+  /**
+   * Every matching item, across as many pages as it takes.
+   *
+   * A `Query` returns at most 1 MB and a `LastEvaluatedKey`, and a caller that
+   * ignores the key gets a silent truncation rather than an error — a record
+   * with enough documents would simply stop listing some of them, and no test
+   * with a handful of rows would ever notice.
+   *
+   * The `limit` case is different and is honoured exactly: a caller asking for
+   * the last fifty audit entries wants fifty, so paging stops as soon as it has
+   * them.
+   */
   const queryPrefix = async <T>(
     patientId: PatientId,
     prefix: string,
     options: { limit?: number; descending?: boolean } = {},
   ): Promise<T[]> => {
-    const response = await client.send(
-      new QueryCommand({
-        TableName,
-        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
-        ExpressionAttributeValues: { ':pk': patientPk(patientId), ':prefix': prefix },
-        ...(options.limit === undefined ? {} : { Limit: options.limit }),
-        ...(options.descending === true ? { ScanIndexForward: false } : {}),
-      }),
-    );
-    return (response.Items ?? []).flatMap((item) => {
-      const record = stripKeys<T>(item);
-      return record === null ? [] : [record];
-    });
+    const collected: T[] = [];
+    let startKey: Record<string, unknown> | undefined;
+
+    do {
+      const remaining =
+        options.limit === undefined ? undefined : options.limit - collected.length;
+
+      const response = await client.send(
+        new QueryCommand({
+          TableName,
+          KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+          ExpressionAttributeValues: { ':pk': patientPk(patientId), ':prefix': prefix },
+          ...(remaining === undefined ? {} : { Limit: remaining }),
+          ...(options.descending === true ? { ScanIndexForward: false } : {}),
+          ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+        }),
+      );
+
+      for (const item of response.Items ?? []) {
+        const record = stripKeys<T>(item);
+        if (record !== null) collected.push(record);
+      }
+
+      startKey = response.LastEvaluatedKey;
+      if (options.limit !== undefined && collected.length >= options.limit) break;
+    } while (startKey !== undefined);
+
+    return collected;
   };
 
   return {
@@ -222,30 +288,89 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     },
 
     /**
-     * Every row under this patient, deleted one at a time.
+     * Every row under this patient, deleted one at a time, to the last page.
      *
      * Not a batch: `BatchWriteItem` caps at 25 and partially succeeds, which
      * for an erasure means reporting a deletion that half happened. Slower and
      * answerable beats faster and unprovable.
+     *
+     * The pagination is the same argument. One `Query` returns a page, and a
+     * partition holding a few hundred documents, their summaries and an audit
+     * trail spans several — so the loop follows `LastEvaluatedKey` until there
+     * is nothing left, and re-queries from the start afterwards rather than
+     * trusting that a single sweep saw rows written while it ran.
+     *
+     * The deletion marker survives: it is what stops anything writing into the
+     * partition while this runs, and it is the caller's to remove once the
+     * objects are gone too. That is also what makes this resumable — a sweep
+     * that dies half way leaves the fence standing, and running it again
+     * finishes the job.
      */
     async deleteEverythingFor(patientId) {
-      const response = await client.send(
-        new QueryCommand({
-          TableName,
-          KeyConditionExpression: 'PK = :pk',
-          ExpressionAttributeValues: { ':pk': patientPk(patientId) },
-          ProjectionExpression: 'PK, SK',
-        }),
-      );
+      let deleted = 0;
 
-      const items = response.Items ?? [];
-      for (const item of items) {
-        await client.send(
-          new DeleteCommand({ TableName, Key: { PK: item.PK as string, SK: item.SK as string } }),
-        );
+      // Two passes at most: the second exists to catch a row written by a
+      // request that was already in flight when the marker went up.
+      for (let sweep = 0; sweep < 2; sweep += 1) {
+        let startKey: Record<string, unknown> | undefined;
+        let deletedThisSweep = 0;
+
+        do {
+          const response = await client.send(
+            new QueryCommand({
+              TableName,
+              KeyConditionExpression: 'PK = :pk',
+              ExpressionAttributeValues: { ':pk': patientPk(patientId) },
+              ProjectionExpression: 'PK, SK',
+              ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
+            }),
+          );
+
+          for (const item of response.Items ?? []) {
+            if (item.SK === PATIENT_DELETION_SK) continue;
+            await client.send(
+              new DeleteCommand({
+                TableName,
+                Key: { PK: item.PK as string, SK: item.SK as string },
+              }),
+            );
+            deletedThisSweep += 1;
+          }
+
+          startKey = response.LastEvaluatedKey;
+        } while (startKey !== undefined);
+
+        deleted += deletedThisSweep;
+        if (deletedThisSweep === 0) break;
       }
 
-      return { items: items.length };
+      return { items: deleted };
+    },
+
+    /**
+     * The fence, written before anything is deleted.
+     *
+     * `attribute_not_exists` keeps the first request's timestamp: a resumed
+     * erasure is the same erasure, and moving the requested-at each time would
+     * make "this record has been half-deleted since Tuesday" unanswerable.
+     */
+    async beginDeletion(marker) {
+      const existing = await get<DeletionMarker>(marker.patientId, PATIENT_DELETION_SK);
+      if (existing !== null) return existing;
+
+      await put(marker.patientId, PATIENT_DELETION_SK, { ...marker });
+      return marker;
+    },
+
+    getDeletion: (patientId) => get<DeletionMarker>(patientId, PATIENT_DELETION_SK),
+
+    async clearDeletion(patientId) {
+      await client.send(
+        new DeleteCommand({
+          TableName,
+          Key: { PK: patientPk(patientId), SK: PATIENT_DELETION_SK },
+        }),
+      );
     },
 
     async putDocument(patientId, document) {

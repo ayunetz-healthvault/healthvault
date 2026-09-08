@@ -202,16 +202,35 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
    * record deletes the log of who did what to it. That is the correct reading
    * of erasure, and the response says it plainly rather than leaving a partial
    * trail behind under a patient nobody can name.
+   *
+   * ## Why this is an operation and not a statement
+   *
+   * An erasure is several thousand deletes across an object store and a table,
+   * and the process running it can die in the middle. The version this replaces
+   * would then have deleted some of somebody's documents, reported nothing at
+   * all, and left the rest reachable — while an upload already in flight, or a
+   * worker finishing a job it started a minute earlier, wrote fresh rows into
+   * the partition behind the sweep.
+   *
+   * So it runs in a shape that survives being interrupted:
+   *
+   * 1. **A marker goes down first.** Every write path checks it, so nothing new
+   *    enters the record from the moment the deletion is accepted.
+   * 2. **Bytes, then rows.** A row deleted before its object leaves the object
+   *    unreachable, undeletable, and still there.
+   * 3. **Grants last, the caller's own last of all** — so an interrupted
+   *    erasure can be resumed by the person who asked for it.
+   * 4. **The marker comes down at the very end.** Its presence is the evidence
+   *    that this record is half-erased; calling this endpoint again finishes the
+   *    job, and does not ask for the name a second time because the record it
+   *    would be typed against is already gone.
    */
   app.delete(
     '/v1/patients/:patientId',
     { preHandler: app.authenticate },
     async (request, reply) => {
       const params = patientParam.safeParse(request.params);
-      const body = deleteConfirmation.safeParse(request.body);
-      if (!params.success || !body.success) {
-        return reply.code(400).send(invalid('Type the record’s name to confirm.'));
-      }
+      if (!params.success) return reply.code(400).send(invalid('Provide a patient id.'));
 
       const grant = await requireAccess(
         request,
@@ -222,11 +241,32 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
       );
       if (grant === null) return reply;
 
+      const started = await patients.getDeletion(params.data.patientId);
       const patient = await patients.getPatient(params.data.patientId);
-      if (patient === null) return reply.code(404).send(notFound('patient'));
 
-      if (body.data.confirmName.trim().toLowerCase() !== patient.fullName.trim().toLowerCase()) {
-        return reply.code(400).send(invalid('That name does not match this record.'));
+      /**
+       * A deletion already under way is resumed rather than restarted.
+       *
+       * The typed name is not asked for again: the profile row it would be
+       * checked against may already be deleted, and the person has confirmed
+       * this once. What is *not* skipped is the authorisation above — a resume
+       * is still `self` only.
+       */
+      if (started === null) {
+        const body = deleteConfirmation.safeParse(request.body);
+        if (!body.success) {
+          return reply.code(400).send(invalid('Type the record’s name to confirm.'));
+        }
+        if (patient === null) return reply.code(404).send(notFound('patient'));
+        if (body.data.confirmName.trim().toLowerCase() !== patient.fullName.trim().toLowerCase()) {
+          return reply.code(400).send(invalid('That name does not match this record.'));
+        }
+
+        await patients.beginDeletion({
+          patientId: params.data.patientId,
+          requestedByAccountId: grant.accountId,
+          requestedAt: new Date().toISOString(),
+        });
       }
 
       // Bytes first. A row deleted before its object leaves the object with
@@ -250,16 +290,36 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
        * Every grant is revoked, so nobody is left holding access to a record
        * that no longer exists — and so a helper's device drops its cached copy
        * on its next pull.
+       *
+       * The caller's own grant goes last. Revoking it first would lock the
+       * person out of their own half-finished erasure: `requireAccess` would
+       * refuse the resume, and the record would sit fenced and partly deleted
+       * with nobody able to finish it.
        */
       const grants = await access.listGrantsForPatient(params.data.patientId);
-      for (const held of grants) {
+      const ordered = [
+        ...grants.filter((held) => held.accountId !== grant.accountId),
+        ...grants.filter((held) => held.accountId === grant.accountId),
+      ];
+      for (const held of ordered) {
         if (held.status === 'active') {
           await access.revokeGrant(params.data.patientId, held.accountId, grant.accountId);
         }
       }
 
+      /**
+       * The fence comes down last, once there is nothing left to fence.
+       *
+       * Anything that failed above leaves it standing, which is exactly what
+       * makes the next call a resume rather than a fresh deletion of a record
+       * that is already half gone.
+       */
+      await patients.clearDeletion(params.data.patientId);
+
       return reply.send({
         deleted: true,
+        /** True when this call finished an erasure an earlier one had begun. */
+        resumed: started !== null,
         itemsRemoved: items,
         pagesRemoved: documents.reduce((total, document) => total + document.pageCount, 0),
         grantsRevoked: grants.length,

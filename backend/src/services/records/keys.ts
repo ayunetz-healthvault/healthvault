@@ -212,3 +212,19 @@ export const PATIENT_CONSENT_PREFIX = 'CONSENT#';
 export const patientAuditSk = (timestamp: string, eventId: string): string =>
   `AUDIT#${timestamp}#${eventId}`;
 export const PATIENT_AUDIT_PREFIX = 'AUDIT#';
+
+/**
+ * The one row that says this record is being erased.
+ *
+ * Written before the first byte is deleted and removed after the last, so a
+ * deletion that dies half way leaves evidence of itself rather than a record
+ * that looks ordinary and is missing half its documents. Everything that writes
+ * to a record checks for it: an upload that lands mid-erasure, or a worker that
+ * finishes a job started before it, would otherwise put rows back into a
+ * partition somebody has just asked to have emptied.
+ *
+ * `!` sorts before every other prefix in use, so the marker is the first item a
+ * full-partition query returns — which is what makes it cheap to skip when the
+ * erasure sweeps the partition.
+ */
+export const PATIENT_DELETION_SK = '!DELETION';

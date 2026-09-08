@@ -386,3 +386,148 @@ describe('deleting an account', () => {
     );
   });
 });
+
+/**
+ * An erasure that is interrupted, and an upload that arrives during one.
+ *
+ * The version these describe reported `deleted: true` after a single pass over
+ * a record and did nothing to stop anything writing into it while that pass
+ * ran. Two consequences, both silent: a partition bigger than one query page
+ * kept most of itself, and an upload or a worker write that landed behind the
+ * sweep left the record quietly rebuilt around it — with the person holding a
+ * response that said their medical history was gone.
+ */
+describe('a deletion in progress', () => {
+  const deleteRecordNoBody = async (accountId: string, patientId = PATIENT) =>
+    app.inject({
+      method: 'DELETE',
+      url: `/v1/patients/${patientId}`,
+      headers: await auth(accountId),
+    });
+
+  const beginDeletion = async (): Promise<void> => {
+    await patients.beginDeletion({
+      patientId: PATIENT,
+      requestedByAccountId: 'acc_alice',
+      requestedAt: NOW,
+    });
+  };
+
+  it('fences new documents out of the record', async () => {
+    await beginDeletion();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v1/patients/${PATIENT}/documents`,
+      headers: await auth('acc_alice'),
+      payload: {
+        title: 'Discharge summary',
+        category: 'discharge_summary',
+        documentDate: '2026-09-08',
+        pageCount: 1,
+      },
+    });
+
+    // Gone, not conflict: the record is going away and retrying cannot help.
+    expect(response.statusCode).toBe(410);
+    expect(response.json()).toMatchObject({ code: 'record_deleting' });
+    expect(await patients.listDocuments(PATIENT)).toHaveLength(1);
+  });
+
+  /**
+   * The dangerous one. The pages were written straight to the object store with
+   * a URL signed before the deletion started, so this is the request that would
+   * have queued a job and rebuilt the record behind the sweep.
+   */
+  it('refuses a late upload completion', async () => {
+    await beginDeletion();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v1/patients/${PATIENT}/documents/doc_1/uploads/complete`,
+      headers: await auth('acc_alice'),
+    });
+
+    expect(response.statusCode).toBe(410);
+  });
+
+  it('refuses a follow-up and a consent decision', async () => {
+    await beginDeletion();
+
+    const followUp = await app.inject({
+      method: 'POST',
+      url: `/v1/patients/${PATIENT}/follow-ups`,
+      headers: await auth('acc_alice'),
+      payload: { title: 'Eye clinic', kind: 'doctor_visit', dueDate: '2026-10-01' },
+    });
+    const consent = await app.inject({
+      method: 'POST',
+      url: `/v1/patients/${PATIENT}/consent`,
+      headers: await auth('acc_alice'),
+      payload: {
+        purpose: 'ai_processing',
+        granted: true,
+        noticeVersion: CURRENT_NOTICE_VERSION,
+      },
+    });
+
+    expect(followUp.statusCode).toBe(410);
+    expect(consent.statusCode).toBe(410);
+  });
+
+  /**
+   * A resume, which is what an interrupted erasure needs: the marker is still
+   * standing, the profile row may already be gone, and asking the person to
+   * type a name that no longer exists anywhere would leave the record
+   * half-deleted for ever.
+   */
+  it('finishes an erasure that stopped half way, without asking for the name again', async () => {
+    await beginDeletion();
+    await patients.deletePatient(PATIENT);
+
+    const response = await deleteRecordNoBody('acc_alice');
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ deleted: true, resumed: true });
+    expect(await patients.listDocuments(PATIENT)).toEqual([]);
+    expect(await patients.getSummary(PATIENT, 'doc_1')).toBeNull();
+    expect(await patients.getDeletion(PATIENT)).toBeNull();
+  });
+
+  /** A resume is still `self` only. Being half-deleted widens nothing. */
+  it('refuses to resume for anybody but the record’s subject', async () => {
+    await beginDeletion();
+    await invite('acc_helper', 'manager');
+
+    expect((await deleteRecordNoBody('acc_helper')).statusCode).toBe(403);
+    expect(await patients.getDeletion(PATIENT)).not.toBeNull();
+  });
+
+  /** A first request still has to be confirmed by typing the name. */
+  it('will not start an erasure without the typed name', async () => {
+    const response = await deleteRecordNoBody('acc_alice');
+
+    expect(response.statusCode).toBe(400);
+    expect(await patients.getPatient(PATIENT)).not.toBeNull();
+  });
+
+  it('takes the fence down only when there is nothing left to fence', async () => {
+    await deleteRecord('acc_alice', 'Meera Nair');
+
+    expect(await patients.getDeletion(PATIENT)).toBeNull();
+  });
+
+  /**
+   * The caller's own grant is revoked last, so an erasure that dies during
+   * revocation can still be finished by the person who asked for it. Revoking
+   * it first would lock them out of their own half-deleted record.
+   */
+  it('leaves the requester able to finish, revoking their grant last', async () => {
+    await invite('acc_helper', 'manager');
+
+    await deleteRecord('acc_alice', 'Meera Nair');
+
+    expect((await access.getGrant(PATIENT, 'acc_helper'))?.status).toBe('revoked');
+    expect((await access.getGrant(PATIENT, 'acc_alice'))?.status).toBe('revoked');
+  });
+});

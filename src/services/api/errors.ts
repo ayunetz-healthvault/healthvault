@@ -75,6 +75,14 @@ export const kindForStatus = (status: number): ApiErrorKind => {
   if (status === 401) return 'unauthorized';
   if (status === 403) return 'forbidden';
   if (status === 404) return 'not_found';
+  /**
+   * Gone: the record is being erased, so it is not coming back.
+   *
+   * Read as `not_found` rather than left to the `unknown` fallback, which
+   * retries. A change addressed to a record that is being deleted would
+   * otherwise be attempted six times over an hour before anybody was told.
+   */
+  if (status === 410) return 'not_found';
   if (status === 409) return 'conflict';
   if (status === 413) return 'too_large';
   if (status === 429) return 'rate_limited';

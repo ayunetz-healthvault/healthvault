@@ -13,7 +13,7 @@ import {
 } from '../../services/consent/policy.js';
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
 import { requireAccess } from './requireAccess.js';
-import { callerOf } from './shared.js';
+import { beingDeleted, callerOf } from './shared.js';
 
 /**
  * What a person has agreed to, stored where the worker can read it.
@@ -168,6 +168,17 @@ export const consentRoutes: FastifyPluginAsync<ConsentRoutesOptions> = async (
         'manage_consent',
       );
       if (grant === null) return reply;
+
+      /**
+       * A record being erased takes no more decisions.
+       *
+       * Withdrawing consent during a deletion changes nothing that is not
+       * already happening, and granting it would leave a permission row behind
+       * in a partition that has just been swept.
+       */
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(410).send(beingDeleted());
+      }
 
       const accountId = callerOf(request).ownerId;
 

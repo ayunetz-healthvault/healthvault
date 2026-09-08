@@ -8,6 +8,7 @@ import type { Grant } from '../../src/services/access/policy.js';
 import type { ConsentRecord } from '../../src/services/consent/policy.js';
 import type {
   AuditEntry,
+  DeletionMarker,
   PatientRecord,
   PatientRecordRepository,
 } from '../../src/services/records/PatientRecordRepository.js';
@@ -186,6 +187,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
   const followUps = new Map<string, FollowUpRecord>();
   const consent: ConsentRecord[] = [];
   const audit: AuditEntry[] = [];
+  const deletions = new Map<string, DeletionMarker>();
 
   const key = (patientId: string, id: string): string => `${patientId}::${id}`;
 
@@ -226,6 +228,26 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
       audit.push(...keptAudit);
 
       return { items };
+    },
+
+    /**
+     * The fence, modelled here because the routes depend on it.
+     *
+     * Kept out of `deleteEverythingFor` above for the same reason the real
+     * repository keeps it: the marker outlives the sweep, and the caller takes
+     * it down once the objects are gone too.
+     */
+    async beginDeletion(marker) {
+      const existing = deletions.get(marker.patientId);
+      if (existing !== undefined) return existing;
+      deletions.set(marker.patientId, marker);
+      return marker;
+    },
+    async getDeletion(patientId) {
+      return deletions.get(patientId) ?? null;
+    },
+    async clearDeletion(patientId) {
+      deletions.delete(patientId);
     },
 
     async putDocument(patientId, document) {

@@ -6,7 +6,7 @@ import type { ObjectStore } from '../../services/objects/ObjectStore.js';
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
 import type { SummaryCorrection } from '../../services/records/RecordRepository.js';
 import { requireAccess } from './requireAccess.js';
-import { notFound } from './shared.js';
+import { beingDeleted, notFound } from './shared.js';
 
 /**
  * Checking a summary against the original, and correcting it.
@@ -148,6 +148,10 @@ export const reviewRoutes: FastifyPluginAsync<ReviewRoutesOptions> = async (
       );
       if (grant === null) return reply;
 
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(410).send(beingDeleted());
+      }
+
       const summary = await patients.getSummary(params.data.patientId, params.data.documentId);
       if (summary === null) return reply.code(404).send(notFound('summary'));
 
@@ -221,6 +225,10 @@ export const reviewRoutes: FastifyPluginAsync<ReviewRoutesOptions> = async (
         'write_record',
       );
       if (grant === null) return reply;
+
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(410).send(beingDeleted());
+      }
 
       const summary = await patients.getSummary(params.data.patientId, params.data.documentId);
       if (summary === null) return reply.code(404).send(notFound('summary'));

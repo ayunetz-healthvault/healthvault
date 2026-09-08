@@ -5,7 +5,7 @@ import type { AccessRepository } from '../../services/access/AccessRepository.js
 import type { ObjectStore } from '../../services/objects/ObjectStore.js';
 import type { JobQueue } from '../../services/queue/JobQueue.js';
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
-import { callerOf, notFound } from './shared.js';
+import { beingDeleted, callerOf, notFound } from './shared.js';
 import { requireAccess } from './requireAccess.js';
 
 /**
@@ -74,6 +74,16 @@ const invalid = (message: string) => ({
   retryable: false,
 });
 
+/**
+ * The status for a record that is being erased.
+ *
+ * `410 Gone` rather than `409`: this is not two people editing the same thing,
+ * and a client that treated it as a conflict would sit waiting for a state to
+ * come back that never will. Gone is what it is, and the app maps it to the
+ * same "this record is no longer available to you" as a 404.
+ */
+const RECORD_DELETING = 410;
+
 export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
   app,
   { access, patients, objects, queue },
@@ -96,6 +106,17 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
         'upload_document',
       );
       if (grant === null) return reply;
+
+      /**
+       * Nothing new goes into a record that is being erased.
+       *
+       * Checked after the grant, because a caller with no access must not learn
+       * that a record exists at all — and before anything is written, because
+       * the deletion sweep may already have passed this key.
+       */
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(RECORD_DELETING).send(beingDeleted());
+      }
 
       const now = new Date().toISOString();
       const document = {
@@ -301,6 +322,18 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
           retryable: true,
           details: { missingPages: missing },
         });
+      }
+
+      /**
+       * A late upload, landing during an erasure.
+       *
+       * The pages were written straight to the object store with a URL signed
+       * before the deletion began, so refusing here is what stops the record
+       * being rebuilt around them — and the deletion's own object sweep removes
+       * the bytes.
+       */
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(RECORD_DELETING).send(beingDeleted());
       }
 
       const existing = await patients.getProcessing(

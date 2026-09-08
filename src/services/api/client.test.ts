@@ -102,6 +102,20 @@ describe('apiRequest', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * A record being erased answers 410. Left to the `unknown` fallback it would
+   * be retried for an hour before anybody was told the record had gone.
+   */
+  it('reads a 410 as gone rather than something to retry', async () => {
+    setTokenProvider(async () => 'token');
+    respond(410, { code: 'record_deleting' });
+
+    await expect(apiClient.get('/v1/patients/pat_1')).rejects.toMatchObject({
+      kind: 'not_found',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not try to refresh a request that never carried a token', async () => {
     const refresher = jest.fn(async () => 'fresh');
     setTokenProvider(async () => 'token', refresher);
