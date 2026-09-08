@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { AccessRepository } from '../access/AccessRepository.js';
 import type { ObjectStore } from '../objects/ObjectStore.js';
 import type { JobQueue, ProcessingJob } from '../queue/JobQueue.js';
+import { permits, type ConsentRecord } from '../consent/policy.js';
 import type { PatientRecordRepository } from '../records/PatientRecordRepository.js';
 import { ProcessingError, type DocumentProcessor, type TemporaryPage } from '../../types/processing.js';
 
@@ -44,6 +45,14 @@ export interface DocumentWorkerOptions {
   access: AccessRepository;
   objects: ObjectStore;
   processor: DocumentProcessor;
+  /**
+   * The consent records for a patient.
+   *
+   * Injected rather than read from a repository so the worker cannot be built
+   * without somebody deciding where consent comes from. A default that returned
+   * "allowed" would be the single worst line in this file.
+   */
+  consentFor: (patientId: string) => Promise<ConsentRecord[]>;
   /**
    * Attempts before a job is dead-lettered.
    *
@@ -85,7 +94,9 @@ export type SkipReason =
   /** The document was deleted while the job waited. */
   | 'document_missing'
   /** Nobody holds an active grant, so there is nobody this result is for. */
-  | 'no_active_grant';
+  | 'no_active_grant'
+  /** Optional AI processing is not permitted for this record. */
+  | 'ai_not_permitted';
 
 export interface JobOutcome {
   readonly job: ProcessingJob;
@@ -114,6 +125,7 @@ export const createDocumentWorker = ({
   access,
   objects,
   processor,
+  consentFor,
   maxAttempts = DEFAULT_MAX_ATTEMPTS,
   log = () => undefined,
 }: DocumentWorkerOptions): DocumentWorker => {
@@ -164,6 +176,31 @@ export const createDocumentWorker = ({
     if (!(await someoneCanStillSee(patientId))) {
       log({ kind: 'skipped', documentId, reason: 'no_active_grant' });
       return { job, result: 'skipped', reason: 'no_active_grant' };
+    }
+
+    /**
+     * Optional AI processing, checked before the work starts.
+     *
+     * The document is already stored — that is the `storage` purpose, and it is
+     * not in question here. What this decides is whether its text may be sent
+     * to a summarisation provider, which is a separate agreement somebody can
+     * decline while keeping the app.
+     *
+     * Absent consent is *not* permission. A record created before consent was
+     * asked for must not be processed on the strength of a missing row.
+     */
+    if (!permits(await consentFor(patientId), 'ai_processing')) {
+      log({ kind: 'skipped', documentId, reason: 'ai_not_permitted' });
+      await patients.putProcessing(patientId, {
+        documentId,
+        // Not a failure. Nothing went wrong, and the document is stored exactly
+        // as the user asked; there is simply no summary, and the screen says so.
+        status: 'manual_review',
+        attempts: attempt,
+        failureCode: 'ai_not_permitted',
+        updatedAt: new Date().toISOString(),
+      });
+      return { job, result: 'skipped', reason: 'ai_not_permitted' };
     }
 
     log({ kind: 'started', documentId, attempt });
@@ -231,6 +268,20 @@ export const createDocumentWorker = ({
       if (!(await someoneCanStillSee(patientId))) {
         log({ kind: 'skipped', documentId, reason: 'no_active_grant' });
         return { job, result: 'skipped', reason: 'no_active_grant' };
+      }
+
+      /**
+       * Consent, checked again before the result is written.
+       *
+       * Somebody can withdraw AI processing while a job is running. This cannot
+       * undo the provider call that already happened — that limit is stated in
+       * `describeWithdrawal` rather than hidden — but it stops the result being
+       * persisted and shown, which is what "stop processing my documents"
+       * reasonably means to the person who asked.
+       */
+      if (!permits(await consentFor(patientId), 'ai_processing')) {
+        log({ kind: 'skipped', documentId, reason: 'ai_not_permitted' });
+        return { job, result: 'skipped', reason: 'ai_not_permitted' };
       }
 
       await patients.putSummary(patientId, {

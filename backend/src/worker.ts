@@ -44,6 +44,17 @@ const start = async (): Promise<void> => {
     patients: createPatientRecordRepository(stack),
     access: createAccessRepository(stack),
     objects: createObjectStore(stack),
+    /**
+     * Where consent comes from.
+     *
+     * Wired explicitly rather than defaulted, because a default that returned
+     * "allowed" would silently send every record to a provider. Until the
+     * consent store lands this returns nothing, and nothing means not
+     * permitted — so a worker run against a stack without consent records
+     * stores documents and produces no summaries, which is the safe direction
+     * to be wrong in.
+     */
+    consentFor: async () => [],
     processor: new DocumentProcessingOrchestrator({
       ocrProvider: new TesseractOcrProvider(),
       // Mock unless a key is explicitly configured — see providerFactory.

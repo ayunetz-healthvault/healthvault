@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ConsentRecord } from '../../src/services/consent/policy.js';
 import { createDocumentWorker, type WorkerEvent } from '../../src/services/worker/DocumentWorker.js';
 import type { ObjectStore } from '../../src/services/objects/ObjectStore.js';
 import type { JobQueue, ProcessingJob, ReceivedJob } from '../../src/services/queue/JobQueue.js';
@@ -31,6 +32,20 @@ const job = (patch: Partial<ProcessingJob> = {}): ProcessingJob => ({
 let patients: ReturnType<typeof inMemoryPatientRepository>;
 let access: ReturnType<typeof inMemoryAccessRepository>;
 let events: WorkerEvent[];
+let consent: ConsentRecord[];
+
+/** AI processing agreed to, which is what most of these tests assume. */
+const aiPermitted = (): ConsentRecord[] => [
+  {
+    patientId: PATIENT,
+    purpose: 'ai_processing',
+    granted: true,
+    decidedBy: OWNER,
+    decidedAt: '2026-09-01T00:00:00.000Z',
+    noticeVersion: '2026-09-08.1',
+    onBehalfOfPatient: false,
+  },
+];
 
 const objects: ObjectStore = {
   keyFor: ({ patientId, documentId, page }) =>
@@ -93,6 +108,7 @@ const buildWorker = (
     access,
     objects,
     processor,
+    consentFor: async () => consent,
     maxAttempts,
     log: (event) => events.push(event),
   });
@@ -133,6 +149,7 @@ beforeEach(async () => {
   patients = inMemoryPatientRepository();
   access = inMemoryAccessRepository();
   events = [];
+  consent = aiPermitted();
   await seed();
 });
 
@@ -290,6 +307,94 @@ describe('the record changed while the job waited', () => {
 
     await buildWorker(processor).handle(job());
 
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+  });
+});
+
+describe('optional AI processing', () => {
+  /**
+   * The document is stored either way — that is the storage purpose, and it is
+   * not in question. What this decides is whether its text may be sent to a
+   * summarisation provider, which somebody can decline while keeping the app.
+   */
+  it('does not send anything to the provider when it was not agreed to', async () => {
+    consent = [];
+    const processor = succeedingProcessor();
+
+    const outcome = await buildWorker(processor).handle(job());
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'ai_not_permitted' });
+    expect(processor.process).not.toHaveBeenCalled();
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+  });
+
+  /** A record created before consent was asked for must not be processed. */
+  it('treats a missing answer as not permitted, never as allowed', async () => {
+    consent = [];
+
+    await buildWorker(succeedingProcessor()).handle(job());
+
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({
+      failureCode: 'ai_not_permitted',
+    });
+  });
+
+  it('does not call it a failure — nothing went wrong', async () => {
+    consent = [];
+
+    await buildWorker(succeedingProcessor()).handle(job());
+
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({
+      status: 'manual_review',
+    });
+  });
+
+  it('does not process again after consent is withdrawn', async () => {
+    consent = [
+      ...aiPermitted(),
+      {
+        patientId: PATIENT,
+        purpose: 'ai_processing' as const,
+        granted: false,
+        decidedBy: OWNER,
+        decidedAt: '2026-09-08T09:00:00.000Z',
+        noticeVersion: '2026-09-08.1',
+        onBehalfOfPatient: false,
+      },
+    ];
+    const processor = succeedingProcessor();
+
+    await buildWorker(processor).handle(job());
+
+    expect(processor.process).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Cannot undo the provider call that already happened — that limit is stated
+   * rather than hidden — but "stop processing my documents" reasonably means
+   * the result does not get persisted and shown.
+   */
+  it('does not write a summary when consent is withdrawn mid-run', async () => {
+    const processor: DocumentProcessor = {
+      process: async ({ documentId }) => {
+        consent = [];
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'x' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      },
+    };
+
+    const outcome = await buildWorker(processor).handle(job());
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'ai_not_permitted' });
     expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
   });
 });
