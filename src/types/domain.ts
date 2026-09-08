@@ -317,6 +317,47 @@ export interface DocumentSummary {
   privacy?: PrivacyProcessingResult;
   /** Processing-pipeline version, distinct from `privacy.pipelineVersion`. */
   pipelineVersion?: string;
+  /**
+   * Which run produced this text.
+   *
+   * Carried so a correction can name the version it was made against. Without
+   * it a correction typed against version 1 could land on a version 2 the
+   * person never saw — the classic lost update, except what is lost is a
+   * statement about somebody's medication. Absent means version 1.
+   */
+  version?: number;
+  /**
+   * What people said instead, newest last, never rewritten.
+   *
+   * Append-only, and kept *beside* the model's output rather than applied to
+   * it. Losing the original means nobody can ever tell whether the model was
+   * wrong or the corrector was.
+   */
+  corrections?: SummaryCorrection[];
+  /**
+   * When a person checked this version against the original, and who.
+   *
+   * Note what it is not: a person confirming the app read a page correctly is
+   * not a clinician validating the content, and no screen may describe it as
+   * one.
+   */
+  reviewedAt?: IsoDateTime | null;
+  reviewedBy?: string | null;
+  /** The version that was checked. A newer one is unchecked again. */
+  reviewedVersion?: number;
+}
+
+/** One person's correction to one field of one summary version. */
+export interface SummaryCorrection {
+  readonly id: string;
+  /** Dotted path into the summary, e.g. `findings.0.value`. */
+  readonly field: string;
+  readonly previousValue: string;
+  readonly correctedValue: string;
+  readonly correctedBy: string;
+  readonly correctedAt: IsoDateTime;
+  /** The version the corrector was looking at. */
+  readonly summaryVersion: number;
 }
 
 // ---------------------------------------------------------------------------

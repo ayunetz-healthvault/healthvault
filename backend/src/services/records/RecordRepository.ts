@@ -167,9 +167,32 @@ export interface FollowUpRecord {
   readonly parentId: string;
   readonly title: string;
   readonly dueDate: string;
+  /** `HH:mm` in the patient's clock, or absent when only the day is known. */
+  readonly dueTime?: string | null | undefined;
   readonly status: string;
+  /**
+   * Where this came from: `manual`, or `document` when a summary suggested it.
+   *
+   * Kept because a task somebody typed and a task accepted from a machine's
+   * reading are different things, and the screen has to be able to say which.
+   * A suggestion that nobody accepted never becomes a record at all.
+   */
   readonly origin: string;
+  readonly kind?: string | undefined;
+  readonly notes?: string | undefined;
+  /** The document that prompted it, when there was one. */
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly doctorCategory?: string | null | undefined;
+  /**
+   * The device calendar event, when the person confirmed writing one.
+   *
+   * Stored so a second device does not offer to create a duplicate. Its
+   * presence is never taken as permission — each device asks before it writes
+   * to a calendar it owns.
+   */
+  readonly calendarEventId?: string | null | undefined;
   readonly createdAt: string;
+  readonly updatedAt?: string | undefined;
 }
 
 export interface RecordRepository {

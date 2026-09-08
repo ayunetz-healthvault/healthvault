@@ -163,6 +163,13 @@ export default function ParentProfileScreen(): React.JSX.Element {
 
       <Card style={styles.detailsCard}>
         <ListRow
+          icon="create-outline"
+          title="Notes and symptoms"
+          subtitle="Anything you have noticed, in your own words, ready for the next visit."
+          onPress={() => router.push(`/observation/new?patientId=${parent.id}`)}
+          testID="parent-observation-link"
+        />
+        <ListRow
           icon="shield-checkmark-outline"
           title="What this person has agreed to"
           subtitle="Storing records, reading reports automatically, and sharing with family — each one separately."

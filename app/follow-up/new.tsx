@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { StyleSheet } from 'react-native';
 
 import { Button, Callout, ChipSelect, EmptyState, Screen, Text, TextField } from '@/components';
+import { pushChange } from '@/services/sync/pushService';
 import { useVaultStore } from '@/state/vaultStore';
 import { spacing } from '@/theme';
 import type { DoctorCategory, FollowUpDraft, FollowUpKind } from '@/types/domain';
@@ -28,6 +29,16 @@ export default function NewFollowUpScreen(): React.JSX.Element {
     parentId?: string;
     documentId?: string;
     doctorCategory?: string;
+    /**
+     * A proposal read out of a document, carried in as a starting point.
+     *
+     * Handed to the form rather than saved: the summariser suggesting "repeat
+     * HbA1c in three months" is the document speaking, and it becomes a task
+     * the family owns only when somebody presses save on this screen. Every
+     * field stays editable, including the date.
+     */
+    title?: string;
+    dueDate?: string;
   }>();
 
   const parents = useVaultStore((state) => state.parents);
@@ -39,9 +50,13 @@ export default function NewFollowUpScreen(): React.JSX.Element {
 
   const [draft, setDraft] = useState<FollowUpDraft>({
     parentId: params.parentId ?? parents[0]?.id ?? '',
-    title: '',
+    title: params.title ?? '',
     kind: 'doctor_visit',
-    dueDate: isoToday(7),
+    // A date the document gave, when it gave one, and a week out when it did
+    // not. Never a date inferred from a phrase like "in three months".
+    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(params.dueDate ?? '')
+      ? (params.dueDate as string)
+      : isoToday(7),
     dueTime: null,
     notes: '',
     sourceDocumentId: params.documentId ?? null,
@@ -64,6 +79,30 @@ export default function NewFollowUpScreen(): React.JSX.Element {
     if (!result.valid) return;
 
     const created = addFollowUp(candidate);
+
+    /**
+     * Queued, then sent. A follow-up is the record most likely to be created by
+     * one person and acted on by another, so it goes to the shared record — but
+     * the local write has already happened, and a phone with no signal has
+     * still saved what somebody typed.
+     */
+    void pushChange({
+      patientId: created.parentId,
+      entity: 'follow_up',
+      entityId: created.id,
+      operation: 'create',
+      payload: {
+        title: created.title,
+        kind: created.kind,
+        dueDate: created.dueDate,
+        dueTime: created.dueTime,
+        notes: created.notes,
+        origin: created.sourceDocumentId === null ? 'manual' : 'document',
+        sourceDocumentId: created.sourceDocumentId,
+        doctorCategory: created.doctorCategory,
+      },
+    });
+
     router.replace(`/follow-up/${created.id}`);
   };
 
@@ -98,7 +137,12 @@ export default function NewFollowUpScreen(): React.JSX.Element {
       {params.documentId ? (
         <Callout
           tone="info"
-          message="This follow-up will be linked to the document you were just reading."
+          title={params.title ? 'Suggested by the document' : undefined}
+          message={
+            params.title
+              ? 'This was read out of the document. Check it, change anything that is wrong, and it becomes a task only when you save it.'
+              : 'This follow-up will be linked to the document you were just reading.'
+          }
           testID="followup-new-linked"
         />
       ) : null}

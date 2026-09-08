@@ -10,6 +10,7 @@ import { activeVaultStorage } from '@/services/storage/activeVault';
 import { mergeDocuments } from '@/services/sync/mergeDocuments';
 import type {
   DocumentSummary,
+  SummaryCorrection,
   FollowUp,
   FollowUpDraft,
   FollowUpStatus,
@@ -19,6 +20,7 @@ import type {
   ProcessingStatus,
 } from '@/types/domain';
 import { occurrencesForDay } from '@/services/treatment/occurrences';
+import type { Observation, VisitQuestion } from '@/types/observations';
 import type { DoseEvent, DoseOccurrence, TreatmentSchedule } from '@/types/treatment';
 import { byCreatedAtDesc, byDueDateAsc, isOverdue, nowIso } from '@/utils/date';
 import { avatarColorFor } from '@/utils/format';
@@ -76,6 +78,26 @@ export interface ScheduleConfirmation {
   readonly confirmedBy: string;
 }
 
+export interface ObservationDraft {
+  readonly patientId: string;
+  readonly text: string;
+  /** When it happened, which is not when it was written down. */
+  readonly occurredAt: string;
+  readonly impact: Observation['impact'];
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+}
+
+export interface VisitQuestionDraft {
+  readonly patientId: string;
+  readonly text: string;
+  readonly origin: VisitQuestion['origin'];
+  readonly source?: VisitQuestion['source'];
+  readonly askedBy: string;
+  readonly askedBySelf: boolean;
+  readonly order?: number;
+}
+
 export interface AppliedPull {
   readonly parents: ParentProfile[];
   readonly documentsByPatient: Record<string, MedicalDocument[]>;
@@ -98,12 +120,31 @@ interface VaultState {
    */
   schedules: TreatmentSchedule[];
   /**
+   * What somebody noticed, in their own words.
+   *
+   * Never classified, never mapped to a clinical term. See
+   * `types/observations.ts` for why there is no severity scale here.
+   */
+  observations: Observation[];
+  /** Questions to ask at the next visit, including suggestions once accepted. */
+  visitQuestions: VisitQuestion[];
+  /**
    * What happened to each dose. Append-only, including undo.
    *
    * "Did my mother take her tablet this morning" is a question about the
    * record, and a record that can be quietly erased cannot answer it.
    */
   doseEvents: DoseEvent[];
+  /**
+   * When this device last confirmed the record against the server.
+   *
+   * Null means never — a demonstration build, or an account that has not been
+   * online since signing in. Shown wherever the app presents the record as a
+   * whole (the visit list especially), because a list assembled from a week-old
+   * copy may be missing whatever a sibling added since, and a page that looks
+   * complete while quietly omitting that is worse than no page.
+   */
+  lastPulledAt: string | null;
   seeded: boolean;
 
   // --- Seed -----------------------------------------------------------------
@@ -142,6 +183,16 @@ interface VaultState {
 
   // --- Summaries ------------------------------------------------------------
   addSummary: (summary: DocumentSummary) => void;
+  /**
+   * Appends a correction to a summary.
+   *
+   * Appends, and never edits `summary`. A person saying "the date is 3
+   * September, not 9 March" is a *second* fact about the document, and losing
+   * the first means nobody can tell whether the model was wrong or they were.
+   */
+  addCorrection: (documentId: string, correction: SummaryCorrection) => void;
+  /** Records that a person checked this version against the original. */
+  markSummaryReviewed: (documentId: string, reviewedBy: string, version: number) => void;
 
   // --- Treatment ------------------------------------------------------------
   /**
@@ -157,6 +208,20 @@ interface VaultState {
   supersedeSchedule: (scheduleId: string) => void;
   /** Records a dose event. Ignores null, which is what a no-op tap produces. */
   appendDoseEvent: (event: DoseEvent | null) => void;
+
+  // --- Observations and questions -------------------------------------------
+  addObservation: (draft: ObservationDraft) => Observation;
+  updateObservation: (id: string, patch: { text?: string; impact?: Observation['impact'] }) => void;
+  removeObservation: (id: string) => void;
+  /**
+   * Adds a question.
+   *
+   * `origin` is required, and `accepted_suggestion` means exactly that: a
+   * person read the summariser's suggestion and chose to ask it. There is no
+   * path that adds a suggestion without somebody accepting it.
+   */
+  addVisitQuestion: (draft: VisitQuestionDraft) => VisitQuestion;
+  removeVisitQuestion: (id: string) => void;
 
   // --- Sync -----------------------------------------------------------------
   /**
@@ -188,6 +253,9 @@ export const useVaultStore = create<VaultState>()(
       followUps: [],
       schedules: [],
       doseEvents: [],
+      observations: [],
+      visitQuestions: [],
+      lastPulledAt: null,
       seeded: false,
 
       seedDemoData: () => {
@@ -237,6 +305,9 @@ export const useVaultStore = create<VaultState>()(
           followUps: [],
           schedules: [],
           doseEvents: [],
+          observations: [],
+          visitQuestions: [],
+          lastPulledAt: null,
           seeded: true,
         }),
 
@@ -359,6 +430,9 @@ export const useVaultStore = create<VaultState>()(
           const pulledFor = new Set(pulledSummaries.map((summary) => summary.documentId));
 
           return {
+            // Set only here, where a pull actually succeeded. A failed refresh
+            // must never move this forward — that is the whole point of it.
+            lastPulledAt: nowIso(),
             parents: [...byId.values()],
             documents,
             summaries: [
@@ -373,6 +447,39 @@ export const useVaultStore = create<VaultState>()(
             followUps: state.followUps.filter((followUp) => !removed.has(followUp.parentId)),
           };
         }),
+
+      addCorrection: (documentId, correction) =>
+        set((state) => ({
+          summaries: state.summaries.map((summary) =>
+            summary.documentId === documentId
+              ? { ...summary, corrections: [...(summary.corrections ?? []), correction] }
+              : summary,
+          ),
+        })),
+
+      markSummaryReviewed: (documentId, reviewedBy, version) => {
+        const timestamp = nowIso();
+
+        set((state) => ({
+          summaries: state.summaries.map((summary) =>
+            summary.documentId === documentId
+              ? {
+                  ...summary,
+                  reviewedAt: timestamp,
+                  reviewedBy,
+                  reviewedVersion: version,
+                }
+              : summary,
+          ),
+          // Mirrored onto the document so a list can show which summaries
+          // nobody has checked without loading every summary.
+          documents: state.documents.map((document) =>
+            document.id === documentId
+              ? { ...document, reviewedAt: timestamp, reviewedBy, updatedAt: timestamp }
+              : document,
+          ),
+        }));
+      },
 
       confirmSchedule: (draft) => {
         const timestamp = nowIso();
@@ -442,6 +549,75 @@ export const useVaultStore = create<VaultState>()(
        */
       appendDoseEvent: (event) =>
         set((state) => (event === null ? state : { doseEvents: [...state.doseEvents, event] })),
+
+      addObservation: (draft) => {
+        const timestamp = nowIso();
+
+        const observation: Observation = {
+          id: createId('obs'),
+          patientId: draft.patientId,
+          // Stored exactly as written. Trimmed only of surrounding whitespace —
+          // never normalised, never mapped to a term. See the type.
+          text: draft.text.trim(),
+          occurredAt: draft.occurredAt,
+          impact: draft.impact,
+          recordedBy: draft.recordedBy,
+          recordedBySelf: draft.recordedBySelf,
+          recordedAt: timestamp,
+          version: 1,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({ observations: [...state.observations, observation] }));
+        return observation;
+      },
+
+      updateObservation: (id, patch) =>
+        set((state) => ({
+          observations: state.observations.map((observation) =>
+            observation.id === id
+              ? {
+                  ...observation,
+                  ...(patch.text === undefined ? {} : { text: patch.text.trim() }),
+                  ...(patch.impact === undefined ? {} : { impact: patch.impact }),
+                  // Bumped so a concurrent change is a conflict, not a race.
+                  version: observation.version + 1,
+                  updatedAt: nowIso(),
+                }
+              : observation,
+          ),
+        })),
+
+      removeObservation: (id) =>
+        set((state) => ({
+          observations: state.observations.filter((observation) => observation.id !== id),
+        })),
+
+      addVisitQuestion: (draft) => {
+        const timestamp = nowIso();
+
+        const question: VisitQuestion = {
+          id: createId('obs'),
+          patientId: draft.patientId,
+          text: draft.text.trim(),
+          origin: draft.origin,
+          source: draft.source ?? null,
+          askedBy: draft.askedBy,
+          askedBySelf: draft.askedBySelf,
+          createdAt: timestamp,
+          order: draft.order ?? 0,
+          version: 1,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({ visitQuestions: [...state.visitQuestions, question] }));
+        return question;
+      },
+
+      removeVisitQuestion: (id) =>
+        set((state) => ({
+          visitQuestions: state.visitQuestions.filter((question) => question.id !== id),
+        })),
 
       addFollowUp: (draft) => {
         const timestamp = nowIso();
@@ -531,6 +707,9 @@ export const closeVaultInMemory = (): void => {
     followUps: [],
     schedules: [],
     doseEvents: [],
+    observations: [],
+    visitQuestions: [],
+    lastPulledAt: null,
     seeded: false,
   });
 };
@@ -549,6 +728,9 @@ export interface VaultSnapshot {
   followUps: FollowUp[];
   schedules: TreatmentSchedule[];
   doseEvents: DoseEvent[];
+  observations: Observation[];
+  visitQuestions: VisitQuestion[];
+  lastPulledAt: string | null;
 }
 
 /**
@@ -570,8 +752,34 @@ export const useVaultSnapshot = (): VaultSnapshot =>
       followUps: state.followUps,
       schedules: state.schedules,
       doseEvents: state.doseEvents,
+      observations: state.observations,
+      visitQuestions: state.visitQuestions,
+      lastPulledAt: state.lastPulledAt,
     })),
   );
+
+/**
+ * The current vault as a plain snapshot, outside React.
+ *
+ * For tests and for services that need to read the vault without a hook.
+ * Exported mainly so the field list lives in one place: every caller that built
+ * its own object had to be edited each time the vault grew, which is churn that
+ * teaches nobody anything.
+ */
+export const vaultSnapshot = (): VaultSnapshot => {
+  const state = useVaultStore.getState();
+  return {
+    parents: state.parents,
+    documents: state.documents,
+    summaries: state.summaries,
+    followUps: state.followUps,
+    schedules: state.schedules,
+    doseEvents: state.doseEvents,
+    observations: state.observations,
+    visitQuestions: state.visitQuestions,
+    lastPulledAt: state.lastPulledAt,
+  };
+};
 
 export const selectParent = (state: VaultSnapshot, parentId: string): ParentProfile | undefined =>
   state.parents.find((parent) => parent.id === parentId);
@@ -672,3 +880,19 @@ export const selectDosesForDay = (
 
 const doseEventsFor = (state: VaultSnapshot, patientId: string): DoseEvent[] =>
   state.doseEvents.filter((event) => event.patientId === patientId);
+
+/** One follow-up by id, wherever it belongs. */
+export const selectFollowUp = (state: VaultSnapshot, followUpId: string): FollowUp | undefined =>
+  state.followUps.find((followUp) => followUp.id === followUpId);
+
+/** One person's observations, newest first — the order a visit list wants. */
+export const selectObservations = (state: VaultSnapshot, patientId: string): Observation[] =>
+  state.observations
+    .filter((observation) => observation.patientId === patientId)
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+
+/** One person's questions, in the order the family put them. */
+export const selectVisitQuestions = (state: VaultSnapshot, patientId: string): VisitQuestion[] =>
+  state.visitQuestions
+    .filter((question) => question.patientId === patientId)
+    .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));

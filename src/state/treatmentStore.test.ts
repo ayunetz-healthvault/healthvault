@@ -3,6 +3,7 @@ import {
   selectDosesForDay,
   selectLiveSchedules,
   useVaultStore,
+  vaultSnapshot,
   type VaultSnapshot,
 } from './vaultStore';
 
@@ -15,17 +16,7 @@ import { nextDueDose, recordDose, undoDose } from '@/services/treatment/occurren
  * that somebody is taking a medicine, and that they missed a dose.
  */
 
-const snapshot = (): VaultSnapshot => {
-  const state = useVaultStore.getState();
-  return {
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-    schedules: state.schedules,
-    doseEvents: state.doseEvents,
-  };
-};
+const snapshot = (): VaultSnapshot => vaultSnapshot();
 
 const confirmation = (patch: Record<string, unknown> = {}) => ({
   patientId: 'pat_1',

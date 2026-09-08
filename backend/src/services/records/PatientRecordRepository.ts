@@ -117,6 +117,16 @@ export interface PatientRecordRepository {
 
   putFollowUp(patientId: PatientId, followUp: FollowUpRecord): Promise<void>;
   listFollowUps(patientId: PatientId): Promise<FollowUpRecord[]>;
+  getFollowUp(patientId: PatientId, followUpId: string): Promise<FollowUpRecord | null>;
+  /**
+   * Removes a follow-up.
+   *
+   * Takes the due date as well as the id because the due date is part of the
+   * sort key — that is what makes "everything due before Friday" one query.
+   * The consequence is that changing a due date is a delete and a write, not an
+   * update in place, and a caller that forgets leaves the old row behind.
+   */
+  deleteFollowUp(patientId: PatientId, dueDate: string, followUpId: string): Promise<void>;
 
   /**
    * Records one consent decision. Append-only.
@@ -244,6 +254,20 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     },
 
     listFollowUps: (patientId) => queryPrefix<FollowUpRecord>(patientId, FOLLOW_UP_PREFIX),
+
+    async getFollowUp(patientId, followUpId) {
+      const followUps = await queryPrefix<FollowUpRecord>(patientId, FOLLOW_UP_PREFIX);
+      return followUps.find((followUp) => followUp.followUpId === followUpId) ?? null;
+    },
+
+    async deleteFollowUp(patientId, dueDate, followUpId) {
+      await client.send(
+        new DeleteCommand({
+          TableName,
+          Key: { PK: patientPk(patientId), SK: patientFollowUpSk(dueDate, followUpId) },
+        }),
+      );
+    },
 
     appendConsent: (consent) =>
       put(consent.patientId, patientConsentSk(consent.purpose, consent.decidedAt), { ...consent }),

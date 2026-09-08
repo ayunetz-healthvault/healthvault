@@ -20,6 +20,7 @@ import {
   selectDocumentTimeline,
   selectDosesForDay,
   selectFollowUpsForParent,
+  selectObservations,
   selectLiveSchedules,
   selectParent,
   useVaultSnapshot,
@@ -27,7 +28,8 @@ import {
 } from '@/state/vaultStore';
 import { spacing } from '@/theme';
 import type { DoseOccurrence, DoseState } from '@/types/treatment';
-import { calculateAge } from '@/utils/date';
+import { IMPACT_LABELS } from '@/types/observations';
+import { calculateAge, formatDate } from '@/utils/date';
 
 /** How many of each list the summary screen shows before "see all". */
 const PREVIEW = 3;
@@ -72,6 +74,7 @@ export default function ParentHealthScreen(): React.JSX.Element {
   const schedules = selectLiveSchedules(vault, record.id);
   const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
   const doses = selectDosesForDay(vault, record.id, localDateIn(timezone));
+  const observations = selectObservations(vault, record.id);
 
   const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
     appendDoseEvent(
@@ -192,13 +195,36 @@ export default function ParentHealthScreen(): React.JSX.Element {
         </>
       )}
 
-      <SectionHeader title="Notes and symptoms" testID="me-health-notes-header" />
-      <Callout
-        tone="neutral"
-        title="Not available yet"
-        message="Writing down how you are feeling, in your own words, so it is there at your next visit — this is being built."
-        testID="me-health-notes-notice"
+      <SectionHeader
+        title="Notes and symptoms"
+        actionLabel="Add"
+        onAction={() => router.push(`/observation/new?patientId=${record.id}`)}
+        testID="me-health-notes-header"
       />
+
+      {observations.length === 0 ? (
+        <Card tone="quiet" testID="me-health-notes-empty">
+          <Text variant="callout" tone="secondary">
+            Nothing written down yet. Anything you notice — in your own words — will be here at
+            your next visit.
+          </Text>
+        </Card>
+      ) : (
+        observations.slice(0, PREVIEW).map((observation) => (
+          <Card
+            key={observation.id}
+            tone="quiet"
+            style={styles.medicine}
+            testID={`me-health-note-${observation.id}`}
+          >
+            <Text variant="callout">{observation.text}</Text>
+            <Text variant="caption" tone="secondary">
+              {formatDate(observation.occurredAt.slice(0, 10))} ·{' '}
+              {IMPACT_LABELS[observation.impact]}
+            </Text>
+          </Card>
+        ))
+      )}
 
       <SectionHeader
         title="My to-do"

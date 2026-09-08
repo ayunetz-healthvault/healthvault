@@ -70,11 +70,45 @@ export const endpoints = {
       `/v1/patients/${patientId}/documents/${documentId}/uploads/complete`,
   },
 
+  /**
+   * The things the family has to do next.
+   *
+   * On the server rather than only on a phone because a task is the one record
+   * that is *about* coordination: created by one person, completed by another,
+   * and asked about by both.
+   */
+  followUps: {
+    list: (patientId: string) => `/v1/patients/${patientId}/follow-ups`,
+    create: (patientId: string) => `/v1/patients/${patientId}/follow-ups`,
+    update: (patientId: string, followUpId: string) =>
+      `/v1/patients/${patientId}/follow-ups/${followUpId}`,
+    remove: (patientId: string, followUpId: string) =>
+      `/v1/patients/${patientId}/follow-ups/${followUpId}`,
+  },
+
   // --- Processing (SQS -> worker -> summary provider -> DynamoDB) -----------
   processing: {
     /** Poll target for the processing screen. */
     status: (patientId: string, documentId: string) =>
       `/v1/patients/${patientId}/documents/${documentId}/processing`,
+  },
+
+  /**
+   * Checking a summary against the original, and correcting it.
+   *
+   * Three things stay apart here and the endpoints reflect it: the original
+   * pages, the model's output, and what a person said instead. See ADR-002.
+   */
+  review: {
+    /** Short-lived URLs for the original pages, for reading side by side. */
+    pages: (patientId: string, documentId: string) =>
+      `/v1/patients/${patientId}/documents/${documentId}/pages`,
+    /** Appends a correction. Never edits the model's output. */
+    corrections: (patientId: string, documentId: string) =>
+      `/v1/patients/${patientId}/documents/${documentId}/corrections`,
+    /** Records that a person checked this version. Not a clinical sign-off. */
+    markReviewed: (patientId: string, documentId: string) =>
+      `/v1/patients/${patientId}/documents/${documentId}/review`,
   },
 
   // --- Summaries -----------------------------------------------------------

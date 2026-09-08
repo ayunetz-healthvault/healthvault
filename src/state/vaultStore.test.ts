@@ -6,6 +6,7 @@ import {
   selectSummaryForDocument,
   selectUpcomingFollowUps,
   useVaultStore,
+  vaultSnapshot,
   type VaultSnapshot,
 } from './vaultStore';
 
@@ -26,17 +27,7 @@ const draft = (overrides: Partial<ParentDraft> = {}): ParentDraft => ({
   ...overrides,
 });
 
-const snapshot = (): VaultSnapshot => {
-  const state = useVaultStore.getState();
-  return {
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-    schedules: state.schedules,
-    doseEvents: state.doseEvents,
-  };
-};
+const snapshot = (): VaultSnapshot => vaultSnapshot();
 
 beforeEach(() => {
   useVaultStore.getState().clearAll();

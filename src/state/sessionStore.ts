@@ -6,6 +6,7 @@ import { appLock } from '@/services/auth/appLock';
 import { type AuthSession, authService } from '@/services/auth/authService';
 import { closeVault, openVaultFor } from '@/services/storage/activeVault';
 import { STORAGE_KEYS } from '@/services/storage/persistence';
+import { resetSyncServices } from '@/services/sync/pushService';
 import { closeVaultInMemory, hydrateVaultForAccount } from '@/state/vaultStore';
 import type { AppLockMethod, AuthUser, PrivacySettings } from '@/types/domain';
 import { nowIso } from '@/utils/date';
@@ -159,6 +160,12 @@ export const useSessionStore = create<SessionState>()(
          */
         closeVault();
         closeVaultInMemory();
+        /**
+         * The cached sync services go too. They hold an account id, and one
+         * left behind would let the next person to sign in on this phone flush
+         * the previous account's queue under their own token.
+         */
+        resetSyncServices();
 
         set({
           ...initialState,

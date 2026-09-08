@@ -16,6 +16,7 @@ import {
   Text,
 } from '@/components';
 import { calendarService } from '@/services/calendar/calendarService';
+import { pushChange } from '@/services/sync/pushService';
 import { useSessionStore } from '@/state/sessionStore';
 import { selectDocument, selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
@@ -86,6 +87,19 @@ export default function FollowUpScreen(): React.JSX.Element {
     switch (result.status) {
       case 'created':
         attachCalendarEvent(followUp.id, result.eventId);
+        /**
+         * Recorded on the shared record so another device does not offer to
+         * create the same event again. It grants nothing: writing to a
+         * calendar is a decision each device's owner makes for their own
+         * calendar, and this only says one has already been made here.
+         */
+        void pushChange({
+          patientId: followUp.parentId,
+          entity: 'follow_up',
+          entityId: followUp.id,
+          operation: 'update',
+          payload: { calendarEventId: result.eventId },
+        });
         setNotice({ tone: 'success', message: `Added to ${result.calendarTitle}.` });
         break;
       case 'permission_denied':
@@ -119,6 +133,13 @@ export default function FollowUpScreen(): React.JSX.Element {
     if (!followUp.calendarEventId) return;
     const removed = await calendarService.removeEvent(followUp.calendarEventId);
     attachCalendarEvent(followUp.id, null);
+    void pushChange({
+      patientId: followUp.parentId,
+      entity: 'follow_up',
+      entityId: followUp.id,
+      operation: 'update',
+      payload: { calendarEventId: null },
+    });
     setNotice({
       tone: removed ? 'success' : 'danger',
       message: removed
@@ -131,10 +152,28 @@ export default function FollowUpScreen(): React.JSX.Element {
     setDeleteVisible(false);
     if (followUp.calendarEventId) void calendarService.removeEvent(followUp.calendarEventId);
     removeFollowUp(followUp.id);
+    void pushChange({
+      patientId: followUp.parentId,
+      entity: 'follow_up',
+      entityId: followUp.id,
+      operation: 'delete',
+      payload: null,
+    });
     router.replace('/schedule');
   };
 
-  const setStatus = (status: FollowUpStatus): void => setFollowUpStatus(followUp.id, status);
+  const setStatus = (status: FollowUpStatus): void => {
+    setFollowUpStatus(followUp.id, status);
+    // Completing a task is the change other people most need to see: it is what
+    // stops two family members turning up to the same appointment.
+    void pushChange({
+      patientId: followUp.parentId,
+      entity: 'follow_up',
+      entityId: followUp.id,
+      operation: 'update',
+      payload: { status },
+    });
+  };
 
   return (
     <Screen
@@ -142,6 +181,18 @@ export default function FollowUpScreen(): React.JSX.Element {
       footer={
         followUp.status === 'scheduled' ? (
           <>
+            {/*
+              The list somebody actually takes into the room: their own notes,
+              their questions, the medicines really being taken. Offered from
+              the appointment because that is when it is wanted.
+            */}
+            <Button
+              label="What to take to this"
+              icon="clipboard-outline"
+              variant="secondary"
+              onPress={() => router.push(`/visit/${followUp.id}`)}
+              testID="followup-prepare"
+            />
             <Button
               label="Mark as done"
               icon="checkmark-circle-outline"

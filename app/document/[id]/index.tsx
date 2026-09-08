@@ -19,11 +19,13 @@ import {
 } from '@/components';
 import { AI_SUMMARY_DISCLAIMER } from '@/services/ai/summaryService';
 import { accountService } from '@/services/account/accountService';
+import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocument,
   selectLiveSchedules,
   selectParent,
   selectSummaryForDocument,
+  selectVisitQuestions,
   useVaultSnapshot,
   useVaultStore,
 } from '@/state/vaultStore';
@@ -117,6 +119,9 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
 
   const vault = useVaultSnapshot();
   const removeDocument = useVaultStore((state) => state.removeDocument);
+  const addVisitQuestion = useVaultStore((state) => state.addVisitQuestion);
+  const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
+  const selfRecordId = useSessionStore((state) => state.selfRecordId);
 
   const document = id ? selectDocument(vault, id) : undefined;
   const summary = id ? selectSummaryForDocument(vault, id) : undefined;
@@ -153,6 +158,11 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
     ),
   );
 
+  /** Suggestions already kept, so a row says so instead of offering twice. */
+  const keptQuestions = new Set(
+    selectVisitQuestions(vault, document.parentId).map((question) => question.text),
+  );
+
   const lowConfidence = summary !== undefined && summary.confidence < 0.7;
   const uncertainties = summary?.uncertainties ?? [];
   const explicitFollowUps = summary?.explicitFollowUps ?? [];
@@ -166,6 +176,19 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
       testID="document-summary"
       footer={
         <>
+          {/*
+            Offered first, and only when there is a summary to check. The
+            fastest way to catch a misread number is to look at the page.
+          */}
+          {summary ? (
+            <Button
+              label={summary.reviewedAt ? 'Check this again' : 'Check this against the original'}
+              icon="reader-outline"
+              variant="secondary"
+              onPress={() => router.push(`/document/${document.id}/review`)}
+              testID="document-review"
+            />
+          ) : null}
           <Button
             label="Add a follow-up from this"
             icon="calendar-outline"
@@ -391,6 +414,28 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                         sources={[followUp.source]}
                         testID={`explicit-followup-${index}-source`}
                       />
+                      {/*
+                        Accepting is a separate act. The document asked for
+                        this; nobody has agreed to it, and the button opens a
+                        form rather than creating a task. A proposal that became
+                        a to-do by itself would be the app committing the family
+                        to something a model read off a photograph.
+                      */}
+                      <Button
+                        label="Add this to the list"
+                        variant="secondary"
+                        size="medium"
+                        fullWidth={false}
+                        onPress={() =>
+                          router.push(
+                            `/follow-up/new?parentId=${document.parentId}` +
+                              `&documentId=${document.id}` +
+                              `&title=${encodeURIComponent(followUp.title)}` +
+                              (followUp.date ? `&dueDate=${followUp.date}` : ''),
+                          )
+                        }
+                        testID={`explicit-followup-${index}-accept`}
+                      />
                     </View>
                   </View>
                 ))}
@@ -448,9 +493,39 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                       color={colors.primary}
                       style={styles.questionIcon}
                     />
-                    <Text variant="callout" style={styles.bulletText}>
-                      {question}
-                    </Text>
+                    <View style={styles.bulletText}>
+                      <Text variant="callout">{question}</Text>
+                      {/*
+                        Keeping is an act, and the origin survives it. A
+                        question kept from a suggestion is still a machine's
+                        question that a person agreed with, and the visit list
+                        says so rather than presenting it as the family's own.
+                      */}
+                      {keptQuestions.has(question) ? (
+                        <Text variant="caption" tone="secondary">
+                          Kept for the next visit.
+                        </Text>
+                      ) : (
+                        <Button
+                          label="Keep this question"
+                          variant="secondary"
+                          size="medium"
+                          fullWidth={false}
+                          onPress={() =>
+                            addVisitQuestion({
+                              patientId: document.parentId,
+                              text: question,
+                              origin: 'accepted_suggestion',
+                              source: { documentId: document.id, page: 1 },
+                              askedBy: userId,
+                              askedBySelf: document.parentId === selfRecordId,
+                              order: index,
+                            })
+                          }
+                          testID={`question-${index}-keep`}
+                        />
+                      )}
+                    </View>
                   </View>
                 ))}
               </Card>

@@ -248,6 +248,19 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
         .map(([, value]) => value);
     },
 
+    async getFollowUp(patientId, followUpId) {
+      return followUps.get(key(patientId, followUpId)) ?? null;
+    },
+    /**
+     * The due date is ignored here, and that is a real difference from the
+     * DynamoDB implementation, where it is part of the sort key. Tests that
+     * care about the key must exercise the real repository — see
+     * `test/integration/recordRepository.test.ts`.
+     */
+    async deleteFollowUp(patientId, _dueDate, followUpId) {
+      followUps.delete(key(patientId, followUpId));
+    },
+
     async appendConsent(record) {
       // Append-only, exactly like the real one: the history is the point.
       consent.push(record);

@@ -1,7 +1,12 @@
 import { pullIntoVault } from './pullService';
 
 import { setTokenProvider } from '@/services/api/client';
-import { selectSummaryForDocument, useVaultStore, type VaultSnapshot } from '@/state/vaultStore';
+import {
+  selectSummaryForDocument,
+  useVaultStore,
+  vaultSnapshot,
+  type VaultSnapshot,
+} from '@/state/vaultStore';
 
 /**
  * The journey the review asked for, end to end and synthetic throughout.
@@ -122,17 +127,7 @@ const serve = (options: { reachable: boolean }): void => {
   });
 };
 
-const snapshot = (): VaultSnapshot => {
-  const state = useVaultStore.getState();
-  return {
-    parents: state.parents,
-    documents: state.documents,
-    summaries: state.summaries,
-    followUps: state.followUps,
-    schedules: state.schedules,
-    doseEvents: state.doseEvents,
-  };
-};
+const snapshot = (): VaultSnapshot => vaultSnapshot();
 
 beforeEach(() => {
   fetchMock.mockReset();
