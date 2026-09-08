@@ -26,6 +26,14 @@ export const SECURE_KEYS = {
   idToken: 'ayunetz.auth.idToken',
   accessToken: 'ayunetz.auth.accessToken',
   refreshToken: 'ayunetz.auth.refreshToken',
+  /**
+   * When the ID token expires, epoch millis.
+   *
+   * Kept beside the token rather than read from its own `exp` claim: the claim
+   * is only meaningful once the signature is verified, and that happens on the
+   * backend. This is the provider's stated lifetime, recorded at issue time.
+   */
+  tokenExpiresAt: 'ayunetz.auth.tokenExpiresAt',
   /** Salted hash of the PIN — the PIN itself is never stored. */
   pinVerifier: 'ayunetz.lock.pinVerifier',
   pinSalt: 'ayunetz.lock.pinSalt',

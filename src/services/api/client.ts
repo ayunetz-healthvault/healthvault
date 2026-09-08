@@ -5,12 +5,16 @@ import { config } from '@/config/env';
 /**
  * Thin fetch wrapper for API Gateway.
  *
- * Deliberately dependency-free: no axios, no generated SDK. The client's only
- * jobs are attaching the Cognito ID token, enforcing a timeout, and turning
- * non-2xx responses into a typed `ApiError`.
+ * Deliberately dependency-free: no axios, no generated SDK. The client's jobs
+ * are attaching the Cognito ID token, enforcing a timeout, recovering from a
+ * token that expired mid-flight, and turning non-2xx responses into a typed
+ * `ApiError`.
  *
- * TODO(backend): wire `setTokenProvider` to the real Cognito session in
- * `services/auth/authService.ts` once the user pool exists.
+ * `setTokenProvider` is wired to the real session by `authService.initialise`.
+ * The provider it registers already refreshes ahead of expiry, so the 401 retry
+ * below is the second line of defence, not the first: it covers the cases the
+ * clock cannot predict — a revoked session, a pool whose token lifetime was
+ * shortened, a device whose clock is wrong.
  */
 
 export interface RequestOptions {
@@ -24,12 +28,16 @@ export interface RequestOptions {
 }
 
 type TokenProvider = () => Promise<string | null>;
+/** Forces a refresh and returns the new token, or null if the session ended. */
+type TokenRefresher = () => Promise<string | null>;
 
 let tokenProvider: TokenProvider = async () => null;
+let tokenRefresher: TokenRefresher = async () => null;
 
 /** Registered once at startup by the auth service. */
-export const setTokenProvider = (provider: TokenProvider): void => {
+export const setTokenProvider = (provider: TokenProvider, refresher?: TokenRefresher): void => {
   tokenProvider = provider;
+  tokenRefresher = refresher ?? (async () => null);
 };
 
 const buildUrl = (path: string): string =>
@@ -53,8 +61,16 @@ const messageFrom = (payload: unknown, fallback: string): string => {
   return fallback;
 };
 
-export const apiRequest = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
-  const { method = 'GET', body, timeoutMs = config.api.timeoutMs, anonymous = false } = options;
+/**
+ * Sends one request. Separated from `apiRequest` so the 401 retry can send the
+ * same request twice without re-running the retry logic inside itself.
+ */
+const sendOnce = async <T>(
+  path: string,
+  options: RequestOptions,
+  token: string | null,
+): Promise<T> => {
+  const { method = 'GET', body, timeoutMs = config.api.timeoutMs } = options;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -67,11 +83,7 @@ export const apiRequest = async <T>(path: string, options: RequestOptions = {}):
       'X-Ayunetz-Client': `mobile/${config.environment}`,
     };
     if (body !== undefined) headers['Content-Type'] = 'application/json';
-
-    if (!anonymous) {
-      const token = await tokenProvider();
-      if (token) headers.Authorization = `Bearer ${token}`;
-    }
+    if (token !== null) headers.Authorization = `Bearer ${token}`;
 
     const response = await fetch(buildUrl(path), {
       method,
@@ -95,6 +107,33 @@ export const apiRequest = async <T>(path: string, options: RequestOptions = {}):
     throw toApiError(error);
   } finally {
     clearTimeout(timer);
+  }
+};
+
+export const apiRequest = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
+  const anonymous = options.anonymous ?? false;
+  const token = anonymous ? null : await tokenProvider();
+
+  try {
+    return await sendOnce<T>(path, options, token);
+  } catch (error) {
+    const failure = toApiError(error);
+
+    /**
+     * One retry, and only for an expired credential.
+     *
+     * Not retried on 403: that is a grant decision, and asking again with a
+     * fresher token gets the same answer. Not retried on a request that never
+     * carried a token, because there is nothing to refresh. And exactly once —
+     * a refresh that yields another 401 means the session is over, and looping
+     * would hammer the identity provider on every screen.
+     */
+    if (failure.kind !== 'unauthorized' || anonymous) throw failure;
+
+    const refreshed = await tokenRefresher().catch(() => null);
+    if (refreshed === null) throw failure;
+
+    return sendOnce<T>(path, options, refreshed);
   }
 };
 

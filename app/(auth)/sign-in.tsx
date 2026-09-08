@@ -79,6 +79,12 @@ export default function SignInScreen(): React.JSX.Element {
             onPress={() => router.push('/sign-up')}
             testID="sign-in-to-sign-up"
           />
+          <Button
+            label="I forgot my password"
+            variant="ghost"
+            onPress={() => router.push('/reset-password')}
+            testID="sign-in-to-reset"
+          />
         </>
       }
     >
