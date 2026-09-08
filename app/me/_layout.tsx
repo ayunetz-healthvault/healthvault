@@ -30,7 +30,15 @@ export default function ParentLayout(): React.JSX.Element {
             paddingBottom: spacing.md,
             paddingTop: spacing.sm,
           },
-          tabBarLabelStyle: { fontSize: typography.label.fontSize, fontWeight: '600' },
+          /*
+            The tab bar keeps the caregiver shell's label size even though the
+            screens are set larger. React Navigation gives a label one line and
+            truncates it, and at the comfortable size "My health" came out as
+            "My hea…" on a 360pt phone. The tap targets are what matter here —
+            the bar is taller than the caregiver's — and a label that can be
+            read beats a label that is merely bigger.
+          */
+          tabBarLabelStyle: { fontSize: typography.caption.fontSize, fontWeight: '600' },
           tabBarItemStyle: { paddingVertical: spacing.xs },
         }}
       >

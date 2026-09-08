@@ -12,7 +12,7 @@ never hidden by closing the parent story.
 | Story | Status | Evidence / blocker |
 | --- | --- | --- |
 | KOO-00 | Implemented locally | Baseline reconciled against `ecb38d2`; see below |
-| KOO-01 | Not started | Approved interactive design bundled |
+| KOO-01 | Implemented locally | Both shells built and captured; native device checks open |
 | KOO-02 | Not started | |
 | KOO-03 | Not started | |
 | KOO-04 | Not started | |
@@ -153,6 +153,88 @@ tasks keep the parent's acceptance criteria; no criterion is dropped.
 
 ### Next precise action
 
-KOO-01a: extend `src/theme/tokens.ts` with the approved palette as a named
-scheme, keeping the existing accessibility floors, then build the shared
-primitives the two navigation shells need.
+Superseded — see KOO-01 below.
+
+## KOO-01 — Apply the approved native design to both experiences
+
+**Status: Implemented locally.** Two acceptance criteria are partly open; both
+are named below rather than folded into the others.
+
+- **Date / branch / starting commit:** 8 September 2026 · `claude/koode-implementation-le3t6j` · from `cc3fdf9`
+- **Commits:** `328141a` (KOO-01a, palette and contrast rule), `88f0ff5` (KOO-01b/c, both shells)
+- **Child tasks:** KOO-01a design tokens · KOO-01b caregiver shell · KOO-01c parent shell
+
+### Existing implementation reused
+
+`src/components/ui/*` whole, `ParentCard`, `FollowUpCard`, `DocumentCard`, the
+document components, `selectParentStats` and the follow-up selectors, and the
+existing capture / document / parent / follow-up routes. No component was
+rewritten; `Card` gained two tones, `Text` and `Button` gained density, `Badge`
+was fixed. The screens are new.
+
+### Acceptance criteria
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Palette, card hierarchy, spacing and typography from the reference, on shared tokens | Satisfied | `src/theme/tokens.ts`; 76 assertions in `tokens.test.ts`; the captures |
+| Both navigation shells, on explicitly synthetic fixtures | Satisfied | `app/care/*`, `app/me/*`; the demonstration badge is on every home screen |
+| Parent actions large, labels plain, patient context unambiguous; no persona switch in a live build | Satisfied | `density.comfortable`; `IdentityHeader` names the account on every screen; the preview control is behind `isDemoBuild()` and `resolveExperience` has no setter |
+| Existing routes preserved, redirects added where they moved | Satisfied | `/schedule` and `/settings` still resolve; `app/schedule.tsx` picks per experience |
+| First-use, empty, loading, failure and offline states; no invented medicine or health claim | Satisfied | `me-today` no-treatment state; `care-home` empty attention copy; both asserted in `__tests__/app/` |
+| Compact and large phone, 200% text, screen reader, contrast, focus and touch checks | **Partly satisfied** | Compact/large/narrow captured on web; contrast asserted; **native text scaling and screen-reader checks not done — no device or emulator in this session** |
+
+### Commands actually run
+
+| Command | Result |
+| --- | --- |
+| `npm run verify` | pass — typecheck, lint, **496 tests / 31 suites** (371 at baseline) |
+| `npx expo start --web` + Playwright | 24 captures, all three profiles, both shells |
+
+New tests: 76 palette/scale, 9 experience resolution, 14 attention rules, 10
+route guard, 16 screen tests across the two homes.
+
+### Evidence
+
+`docs/koode/evidence/koo-01/` — captures, the capture script, and a README
+stating plainly what web preview does and does not prove.
+
+### Defects found and fixed while doing this
+
+- **Every deep link was lost on a cold start.** `useRouteGuard` decided the user
+  was signed out during the window between the persisted store rehydrating and
+  the token being read out of secure storage, redirected to sign-in, and then
+  bounced to `/` — discarding the URL that was actually opened. The guard's own
+  comment claimed the opposite. It now waits for `restoreAttempted` and keeps
+  the intended route across the gate. Ten tests, including the exact
+  regression. Found by pointing a browser at `/me`; invisible to the suite.
+- **The demonstration badge clipped** to "…these records are fictio" at the
+  parent's text size — the one label that must be readable. It wraps now.
+- **"My health" truncated to "My hea…"** in the parent tab bar.
+
+### Decisions
+
+- **Two URL spaces, `/care` and `/me`, not one shell that swaps tabs.** The
+  experiences differ in what may be read, so a single route rendering either is
+  one refactor away from showing the wrong person's record.
+- **Experience is derived, never set.** `resolveExperience` reads only the
+  account's relationship to records. The reference's "Compare views" switch is a
+  design-review surface; shipping it would make it an impersonation control.
+- **The reference's muted grey was changed.** `#626D65` is 4.44:1 on peach. The
+  rejected value is pinned in a test next to the replacement.
+- **The parent's Today card shows the no-treatment state.** A confirmed schedule
+  is a different record from an AI's reading of a prescription and does not
+  exist until KOO-10. A placeholder dose on the phone of the person whose record
+  it is reads as an instruction to take a drug.
+
+### External gates still unverified
+
+- [ ] Native rendering on Android and iOS
+- [ ] Native text scaling at 200%
+- [ ] TalkBack / VoiceOver pass over both shells
+
+### Next precise action
+
+KOO-02: replace the mock auth branches with a configured Cognito integration,
+implement expiry/refresh/revocation, and resolve the experience from the
+server's answer rather than a demonstration control. Live Cognito verification
+is blocked with no user pool; everything else is locally testable.

@@ -30,6 +30,17 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
 
 interface SessionState {
   hydrated: boolean;
+  /**
+   * True once the app has *finished trying* to restore a session from secure
+   * storage — whether or not it found one.
+   *
+   * The route guard waits for this. Without it, a cold start on any private
+   * URL is briefly indistinguishable from being signed out: the persisted
+   * store rehydrates first, the guard sees `session === null`, and it sends the
+   * user to sign-in before the token has been read. The session then restores,
+   * the guard bounces off the gate, and the destination is gone.
+   */
+  restoreAttempted: boolean;
   onboardingComplete: boolean;
   user: AuthUser | null;
   session: AuthSession | null;
@@ -51,6 +62,7 @@ interface SessionState {
   backgroundedAt: number | null;
 
   setHydrated: () => void;
+  noteRestoreAttempted: () => void;
   completeOnboarding: () => void;
   acceptDisclaimer: () => void;
   signIn: (session: AuthSession) => void;
@@ -75,6 +87,7 @@ interface SessionState {
 
 const initialState = {
   hydrated: false,
+  restoreAttempted: false,
   onboardingComplete: false,
   user: null as AuthUser | null,
   session: null as AuthSession | null,
@@ -90,6 +103,8 @@ export const useSessionStore = create<SessionState>()(
       ...initialState,
 
       setHydrated: () => set({ hydrated: true }),
+
+      noteRestoreAttempted: () => set({ restoreAttempted: true }),
 
       completeOnboarding: () => set({ onboardingComplete: true }),
 
@@ -117,6 +132,9 @@ export const useSessionStore = create<SessionState>()(
           // someone re-read the disclaimer to sign back in is just friction.
           onboardingComplete: get().onboardingComplete,
           privacy: { ...DEFAULT_PRIVACY, disclaimerAcceptedAt: get().privacy.disclaimerAcceptedAt },
+          // Signing out is itself a completed answer about the session; the
+          // guard must not go back to waiting.
+          restoreAttempted: true,
         });
       },
 
@@ -147,7 +165,7 @@ export const useSessionStore = create<SessionState>()(
         return next;
       },
 
-      reset: () => set({ ...initialState, hydrated: true }),
+      reset: () => set({ ...initialState, hydrated: true, restoreAttempted: true }),
     }),
     {
       name: STORAGE_KEYS.session,
@@ -177,17 +195,28 @@ export const shouldShowLockScreen = (state: {
 }): boolean =>
   state.session !== null && state.privacy.lockMethod !== 'none' && state.lockState !== 'unlocked';
 
-/** Restores a session from SecureStore on cold start. */
+/**
+ * Restores a session from SecureStore on cold start.
+ *
+ * Always marks the attempt as finished, including when it throws. A failed
+ * read must not leave the guard waiting forever on a screen that never
+ * appears — "we looked and found nothing" and "we could not look" both mean
+ * the user has to sign in.
+ */
 export const restoreSession = async (): Promise<void> => {
-  const restored = await authService.refresh();
-  if (restored) {
-    const method = await appLock.resolveEffectiveMethod(
-      useSessionStore.getState().privacy.lockMethod,
-    );
-    useSessionStore.setState({
-      session: restored,
-      user: restored.user,
-      lockState: method === 'none' ? 'unlocked' : 'locked',
-    });
+  try {
+    const restored = await authService.refresh();
+    if (restored) {
+      const method = await appLock.resolveEffectiveMethod(
+        useSessionStore.getState().privacy.lockMethod,
+      );
+      useSessionStore.setState({
+        session: restored,
+        user: restored.user,
+        lockState: method === 'none' ? 'unlocked' : 'locked',
+      });
+    }
+  } finally {
+    useSessionStore.getState().noteRestoreAttempted();
   }
 };
