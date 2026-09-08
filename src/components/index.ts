@@ -6,4 +6,5 @@ export { SourceBadge, type SourceBadgeProps } from './documents/SourceBadge';
 export { FollowUpCard, type FollowUpCardProps } from './followUps/FollowUpCard';
 export { DemoNotice, IdentityHeader, type IdentityHeaderProps } from './koodeHeader';
 export { ParentCard, type ParentCardProps } from './parents/ParentCard';
+export { SyncStatus, type SyncStatusProps } from './sync/SyncStatus';
 export * from './ui';
