@@ -11,6 +11,7 @@ import {
   DocumentCard,
   EmptyState,
   FollowUpCard,
+  ListRow,
   Screen,
   SectionHeader,
   Text,
@@ -106,6 +107,16 @@ export default function ParentProfileScreen(): React.JSX.Element {
           testID="parent-edit-button"
         />
       </View>
+
+      <Card style={styles.detailsCard}>
+        <ListRow
+          icon="shield-checkmark-outline"
+          title="What this person has agreed to"
+          subtitle="Storing records, reading reports automatically, and sharing with family — each one separately."
+          onPress={() => router.push(`/parent/${parent.id}/consent`)}
+          testID="parent-consent-link"
+        />
+      </Card>
 
       <Card style={styles.detailsCard}>
         <DetailRow

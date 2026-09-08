@@ -10,6 +10,7 @@ import { healthRoutes } from './routes/health.js';
 import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
 import { accessRoutes } from './routes/v1/access.js';
+import { consentRoutes } from './routes/v1/consent.js';
 import { documentRoutes } from './routes/v1/documents.js';
 import { reviewRoutes } from './routes/v1/review.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
@@ -159,6 +160,7 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
     await v1.register(accessRoutes, { access, patients });
     await v1.register(documentRoutes, { access, patients, objects, queue });
     await v1.register(reviewRoutes, { access, patients, objects });
+    await v1.register(consentRoutes, { access, patients });
   });
 
   /**

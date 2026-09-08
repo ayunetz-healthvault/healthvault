@@ -37,6 +37,19 @@ export const endpoints = {
     roles: () => '/v1/grant-roles',
   },
 
+  /**
+   * What has been agreed for this record, per purpose.
+   *
+   * Under the patient, not the account, because that is what it is about: one
+   * person can hold records for a parent who agreed to storage and declined
+   * summarisation, and for another who agreed to both.
+   */
+  consent: {
+    current: (patientId: string) => `/v1/patients/${patientId}/consent`,
+    /** Every decision ever made, for the "who agreed to what, when" view. */
+    history: (patientId: string) => `/v1/patients/${patientId}/consent/history`,
+  },
+
   // --- Documents (DynamoDB: PK=PATIENT#<patientId>, SK=DOC#<documentId>) ----
   documents: {
     listForPatient: (patientId: string) => `/v1/patients/${patientId}/documents`,

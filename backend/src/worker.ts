@@ -39,22 +39,28 @@ const start = async (): Promise<void> => {
   const config = loadConfig();
   const stack = loadStackConfig();
 
+  const patients = createPatientRecordRepository(stack);
+
   const worker = createDocumentWorker({
     queue: createJobQueue(stack),
-    patients: createPatientRecordRepository(stack),
+    patients,
     access: createAccessRepository(stack),
     objects: createObjectStore(stack),
     /**
-     * Where consent comes from.
+     * Where consent comes from: the record's own consent history.
      *
-     * Wired explicitly rather than defaulted, because a default that returned
-     * "allowed" would silently send every record to a provider. Until the
-     * consent store lands this returns nothing, and nothing means not
-     * permitted — so a worker run against a stack without consent records
-     * stores documents and produces no summaries, which is the safe direction
-     * to be wrong in.
+     * Read fresh on every job, and again immediately before the summary is
+     * written — see `DocumentWorker`. That is deliberate: a person who
+     * withdraws consent while their document is being read has withdrawn it,
+     * and a value captured at the start of the job would let the run finish
+     * anyway.
+     *
+     * An empty answer is not permission: `permits` requires a granted record,
+     * so a record nobody has decided about is stored and never summarised. A
+     * read that *fails* throws, which the queue retries — also fail-closed,
+     * and preferable to a summary written on the strength of an error.
      */
-    consentFor: async () => [],
+    consentFor: (patientId) => patients.listConsent(patientId),
     processor: new DocumentProcessingOrchestrator({
       ocrProvider: new TesseractOcrProvider(),
       // Mock unless a key is explicitly configured — see providerFactory.

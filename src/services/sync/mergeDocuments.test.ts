@@ -1,6 +1,6 @@
 import { mergeDocuments, mergeOne } from './mergeDocuments';
 
-import type { MedicalDocument, ProcessingStatus } from '@/types/domain';
+import type { DocumentPage, MedicalDocument, ProcessingStatus } from '@/types/domain';
 
 /**
  * Whose word to take about a document.
@@ -31,7 +31,17 @@ const doc = (
   ...patch,
 });
 
-const page = { id: 'pag_1', uri: 'file:///vault/1.jpg', kind: 'image' as const, sizeBytes: 10 };
+const page: DocumentPage = {
+  id: 'pag_1',
+  uri: 'file:///vault/1.jpg',
+  kind: 'image',
+  source: 'camera',
+  fileName: 'page-1.jpg',
+  sizeBytes: 10,
+  width: 800,
+  height: 1200,
+  capturedAt: '2026-09-01T00:00:00.000Z',
+};
 
 describe('a second device pulling records it has never seen', () => {
   it('takes on every state the server reports', () => {

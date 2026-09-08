@@ -59,6 +59,14 @@ export type Action =
   | 'contribute_notes'
   /** See who else holds access. */
   | 'read_grants'
+  /**
+   * Answer, or withdraw, a consent question for this record.
+   *
+   * Separate from `manage_grants` because they are different powers. Sharing a
+   * record with one more helper is not the same as agreeing, on somebody
+   * else's behalf, that their prescriptions may be sent to a language model.
+   */
+  | 'manage_consent'
   /** Invite somebody, change their role, or revoke them. */
   | 'manage_grants'
   /** Hand the record to a different owner, or delete the record itself. */
@@ -67,7 +75,7 @@ export type Action =
 /**
  * The whole authorisation model, as one table.
  *
- * Three properties are worth stating because each is a decision:
+ * Four properties are worth stating because each is a decision:
  *
  * 1. **Only `self` and `manager` may `manage_grants`.** A contributor cannot
  *    widen their own access or add another helper; that is the difference
@@ -77,6 +85,9 @@ export type Action =
  *    caregiver who created a profile does not own the person it describes.
  * 3. **A `viewer` writes nothing at all**, including notes. "Read-only" that
  *    quietly permits appending is not read-only.
+ * 4. **Only `self` and `manager` may `manage_consent`.** A contributor can add
+ *    documents to a record; they cannot decide that the record's owner has
+ *    agreed to have them read by a provider.
  */
 const PERMISSIONS: Record<GrantRole, ReadonlySet<Action>> = {
   self: new Set<Action>([
@@ -89,6 +100,7 @@ const PERMISSIONS: Record<GrantRole, ReadonlySet<Action>> = {
     'contribute_notes',
     'read_grants',
     'manage_grants',
+    'manage_consent',
     'transfer_or_delete_record',
   ]),
   manager: new Set<Action>([
@@ -101,6 +113,13 @@ const PERMISSIONS: Record<GrantRole, ReadonlySet<Action>> = {
     'contribute_notes',
     'read_grants',
     'manage_grants',
+    /**
+     * A manager may answer for the patient — that is what running a record for
+     * a parent who does not use the app means. The answer is stored marked as
+     * given on their behalf, so it can never later be read as the patient's
+     * own; see `ConsentRecord.onBehalfOfPatient`.
+     */
+    'manage_consent',
   ]),
   contributor: new Set<Action>([
     'read_record',

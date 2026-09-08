@@ -20,6 +20,8 @@ import {
   patientPk,
   patientProcessingSk,
   patientSummarySk,
+  patientConsentSk,
+  PATIENT_CONSENT_PREFIX,
   PATIENT_PROFILE_SK,
   type AccountId,
   type PatientId,
@@ -30,6 +32,7 @@ import type {
   ProcessingRecord,
   SummaryRecord,
 } from './RecordRepository.js';
+import type { ConsentRecord } from '../consent/policy.js';
 
 /**
  * A patient's record, keyed by the patient rather than by whoever created it.
@@ -114,6 +117,18 @@ export interface PatientRecordRepository {
 
   putFollowUp(patientId: PatientId, followUp: FollowUpRecord): Promise<void>;
   listFollowUps(patientId: PatientId): Promise<FollowUpRecord[]>;
+
+  /**
+   * Records one consent decision. Append-only.
+   *
+   * There is deliberately no `setConsent`. Overwriting the previous answer
+   * would destroy the only evidence of what somebody agreed to before they
+   * changed their mind — which is exactly the question asked when a record was
+   * processed and should not have been.
+   */
+  appendConsent(consent: ConsentRecord): Promise<void>;
+  /** Every decision ever recorded for this record, oldest first. */
+  listConsent(patientId: PatientId): Promise<ConsentRecord[]>;
 
   appendAudit(entry: AuditEntry): Promise<void>;
   listAudit(patientId: PatientId, limit?: number): Promise<AuditEntry[]>;
@@ -229,6 +244,13 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     },
 
     listFollowUps: (patientId) => queryPrefix<FollowUpRecord>(patientId, FOLLOW_UP_PREFIX),
+
+    appendConsent: (consent) =>
+      put(consent.patientId, patientConsentSk(consent.purpose, consent.decidedAt), { ...consent }),
+
+    // Oldest first, which is what `permits` and `needsReconsent` expect: they
+    // read the history and take the last answer for each purpose.
+    listConsent: (patientId) => queryPrefix<ConsentRecord>(patientId, PATIENT_CONSENT_PREFIX),
 
     appendAudit: (entry) => put(entry.patientId, patientAuditSk(entry.at, entry.eventId), { ...entry }),
 

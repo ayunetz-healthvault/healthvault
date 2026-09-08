@@ -5,6 +5,7 @@ import type {
   IssuedInvitation,
 } from '../../src/services/access/AccessRepository.js';
 import type { Grant } from '../../src/services/access/policy.js';
+import type { ConsentRecord } from '../../src/services/consent/policy.js';
 import type {
   AuditEntry,
   PatientRecord,
@@ -183,6 +184,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
   const processing = new Map<string, ProcessingRecord>();
   const summaries = new Map<string, SummaryRecord>();
   const followUps = new Map<string, FollowUpRecord>();
+  const consent: ConsentRecord[] = [];
   const audit: AuditEntry[] = [];
 
   const key = (patientId: string, id: string): string => `${patientId}::${id}`;
@@ -244,6 +246,16 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
       return [...followUps.entries()]
         .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
         .map(([, value]) => value);
+    },
+
+    async appendConsent(record) {
+      // Append-only, exactly like the real one: the history is the point.
+      consent.push(record);
+    },
+    async listConsent(patientId) {
+      return consent
+        .filter((record) => record.patientId === patientId)
+        .sort((a, b) => a.decidedAt.localeCompare(b.decidedAt));
     },
 
     async appendAudit(entry) {

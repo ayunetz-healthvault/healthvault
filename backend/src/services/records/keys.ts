@@ -188,6 +188,21 @@ export const patientFollowUpSk = (dueDate: string, followUpId: string): string =
 export const patientGsiPk = (patientId: PatientId): string => `PATIENT#${patientId}`;
 
 /**
+ * Consent decisions, one item per answer, never overwritten.
+ *
+ * The timestamp is in the sort key on purpose: this is a history, not a
+ * setting. "They agreed on the 3rd and withdrew on the 9th" is the fact that
+ * has to survive, because a single mutable row can only ever say what is true
+ * now — and the question asked afterwards is always what was true *then*.
+ *
+ * Sorting is lexicographic and the timestamps are ISO-8601 UTC, so a prefix
+ * query returns each purpose's decisions in the order they were made.
+ */
+export const patientConsentSk = (purpose: string, decidedAt: string): string =>
+  `CONSENT#${purpose}#${decidedAt}`;
+export const PATIENT_CONSENT_PREFIX = 'CONSENT#';
+
+/**
  * Audit entries, in the patient's partition rather than the actor's.
  *
  * "Who changed my record" is a question the patient asks, so the answer lives
