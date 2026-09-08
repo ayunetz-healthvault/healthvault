@@ -132,3 +132,64 @@ describe('deleting one record', () => {
     });
   });
 });
+
+/**
+ * One person's record, asked for by name.
+ *
+ * The screen offering "a copy of Amma's record" called the account-wide
+ * endpoint, so the file it produced contained every parent the account helps
+ * with. Each of those is a different person with their own answer about who may
+ * read their history.
+ */
+describe('exporting one record', () => {
+  const requested = (): { url: string; method: string } => {
+    const [url, init] = fetchMock.mock.calls[0] as [string, { method: string }];
+    return { url: String(url), method: init.method };
+  };
+
+  it('asks for that patient, not the account', async () => {
+    fetchMock.mockResolvedValue(
+      reply(200, {
+        exportedAt: '2026-09-08T10:00:00.000Z',
+        exportedUnderRole: 'self',
+        record: { patient: { patientId: 'pat_1' } },
+      }),
+    );
+
+    await accountService.exportRecord('pat_1');
+
+    expect(requested()).toMatchObject({
+      method: 'GET',
+      url: expect.stringContaining('/v1/patients/pat_1/export'),
+    });
+    expect(requested().url).not.toContain('/account/');
+  });
+
+  it('keeps the role it was produced under', async () => {
+    fetchMock.mockResolvedValue(
+      reply(200, {
+        exportedAt: '2026-09-08T10:00:00.000Z',
+        exportedUnderRole: 'viewer',
+        record: {},
+      }),
+    );
+
+    expect(await accountService.exportRecord('pat_1')).toMatchObject({
+      outcome: 'ready',
+      exportedUnderRole: 'viewer',
+    });
+  });
+
+  /**
+   * Exporting one person cannot reach another. Proven here at the level this
+   * service can prove it — the request names one record — with the server's own
+   * grant check tested in `privacyRights.test.ts`.
+   */
+  it('carries the refusal through when the record is not this account’s', async () => {
+    fetchMock.mockResolvedValue(reply(403, { code: 'forbidden' }));
+
+    await expect(accountService.exportRecord('pat_someone_else')).rejects.toMatchObject({
+      kind: 'forbidden',
+    });
+  });
+});

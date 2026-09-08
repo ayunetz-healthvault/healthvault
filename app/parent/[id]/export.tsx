@@ -14,6 +14,7 @@ import {
 } from '@/components';
 import { isBackendEnabled } from '@/config/env';
 import { accountService } from '@/services/account/accountService';
+import { saveRecordExport } from '@/services/account/exportFile';
 import { selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { formatDateTime } from '@/utils/date';
 
@@ -61,18 +62,53 @@ export default function RecordExportScreen(): React.JSX.Element {
     );
   }
 
+  /**
+   * This person's record, and nobody else's.
+   *
+   * The account-wide endpoint used to be called here, which was a scope
+   * mismatch with a real consequence: a screen offering "a copy of Amma's
+   * record" produced a file containing every parent this account helps with.
+   * Each of those records is a different person with a different answer about
+   * who may read it, so the export is asked for by patient id.
+   */
   const handleExport = (): void => {
     setBusy(true);
     setError(null);
+    setNotice(null);
 
-    void accountService.requestDataExport().then(
-      (result) => {
+    void accountService.exportRecord(parent.id).then(
+      async (result) => {
+        if (result.outcome === 'no_backend') {
+          setBusy(false);
+          setNotice(
+            'This build has no server, so everything for this person is already only on this phone.',
+          );
+          return;
+        }
+
+        const saved = await saveRecordExport(parent.fullName, result.exportedAt, {
+          exportedAt: result.exportedAt,
+          exportedUnderRole: result.exportedUnderRole,
+          record: result.record,
+        });
         setBusy(false);
-        setNotice(
-          result.outcome === 'no_backend'
-            ? 'This build has no server, so everything for this person is already only on this phone.'
-            : `Assembled ${formatDateTime(result.exportedAt)}. Saving it to a file from the app is not built yet, so nothing has been written to this phone.`,
-        );
+
+        switch (saved.outcome) {
+          case 'shared':
+            setNotice(
+              `Assembled ${formatDateTime(result.exportedAt)} and saved as ${saved.fileName}. The links to the original pages inside it stop working after about fifteen minutes.`,
+            );
+            break;
+          case 'unavailable':
+            setNotice(
+              `Assembled ${formatDateTime(result.exportedAt)}. Saving a file only works in the phone app, so nothing has been written here.`,
+            );
+            break;
+          case 'failed':
+          default:
+            setError(saved.message);
+            break;
+        }
       },
       () => {
         setBusy(false);
@@ -124,7 +160,8 @@ export default function RecordExportScreen(): React.JSX.Element {
         <Text variant="bodyStrong">Take a copy</Text>
         <Text variant="callout" tone="secondary">
           Everything held for this person as it stands now: documents, summaries and the
-          corrections people made to them, what has been agreed to, and who did what.
+          corrections people made to them, what has been agreed to, and who did what. Nobody
+          else’s record is included.
         </Text>
         <Button
           label="Assemble a copy"

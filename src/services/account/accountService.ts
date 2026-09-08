@@ -53,6 +53,17 @@ export type DataExport =
   | { readonly outcome: 'ready'; readonly exportedAt: string; readonly records: ExportedRecord[] }
   | { readonly outcome: 'no_backend'; readonly exportedAt: string; readonly records: [] };
 
+/** One person's record, exported on its own. */
+export type RecordExport =
+  | {
+      readonly outcome: 'ready';
+      readonly exportedAt: string;
+      /** The access it was produced under. A viewer's export is a viewer's view. */
+      readonly exportedUnderRole: string;
+      readonly record: unknown;
+    }
+  | { readonly outcome: 'no_backend'; readonly exportedAt: string };
+
 export type RecordDeletionResult =
   | { readonly outcome: 'deleted'; readonly itemsRemoved: number; readonly pagesRemoved: number }
   /** No server in this build, so the record only ever existed on this device. */
@@ -131,6 +142,30 @@ export const accountService = {
       exportedAt: string;
       records: ExportedRecord[];
     }>(endpoints.account.requestExport(), {});
+
+    return { outcome: 'ready', ...response };
+  },
+
+  /**
+   * A copy of **one** person's record.
+   *
+   * Separate from `requestDataExport`, and the difference is the point. An
+   * account that helps with three parents holds three different people's
+   * medical histories; a screen that offers "a copy of Amma's record" and calls
+   * the account-wide endpoint hands over the other two as well. Each of those
+   * records has its own answer about who may read it, so each is asked for by
+   * name — and the response says which role it came out under.
+   */
+  async exportRecord(patientId: string): Promise<RecordExport> {
+    if (!isBackendEnabled()) {
+      return { outcome: 'no_backend', exportedAt: nowIso() };
+    }
+
+    const response = await apiClient.get<{
+      exportedAt: string;
+      exportedUnderRole: string;
+      record: unknown;
+    }>(endpoints.patients.export(patientId));
 
     return { outcome: 'ready', ...response };
   },
