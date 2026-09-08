@@ -249,6 +249,178 @@ describe('consent withdrawn while the job is running', () => {
     expect(withdrawMidRun.process).toHaveBeenCalled();
     expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
   });
+
+  /**
+   * Discarding the result is not enough on its own.
+   *
+   * The run had already written `processing`, and the job is acknowledged on
+   * the way out — so a worker that only threw the summary away left the
+   * document saying "being read" with nothing left in the queue that would ever
+   * move it again. The person watching that screen would wait for ever.
+   */
+  it('leaves the document in a state it can actually be in', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const withdrawMidRun: DocumentProcessor = {
+      process: vi.fn(async ({ documentId }) => {
+        await decide(false, '2026-09-08T10:30:00.000Z');
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'Kidney function is stable.' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      }),
+    };
+
+    await buildWorker(withdrawMidRun).handle(job());
+
+    // Not a failure: nothing went wrong, the original is there to read, and no
+    // summary is coming until somebody changes their mind.
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({
+      status: 'manual_review',
+      failureCode: 'ai_not_permitted',
+    });
+  });
+
+  /**
+   * And the queue is told, because a job left un-acknowledged would be
+   * redelivered and pay for the same provider call again to reach the same
+   * discarded answer.
+   */
+  it('acknowledges the job rather than letting it come back', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const acknowledged: string[] = [];
+    const pending: ReceivedJob[] = [{ job: job(), receipt: 'receipt-0' }];
+    const worker = createDocumentWorker({
+      queue: {
+        enqueue: async () => undefined,
+        receive: async (max = 1) => pending.splice(0, max),
+        acknowledge: async (receipt) => {
+          acknowledged.push(receipt);
+        },
+      },
+      patients,
+      access,
+      objects,
+      processor: {
+        process: vi.fn(async ({ documentId }) => {
+          await decide(false, '2026-09-08T10:30:00.000Z');
+          return {
+            documentId,
+            processingStatus: 'ready' as const,
+            summary: { overview: 'Kidney function is stable.' },
+            privacy: {
+              redactionApplied: true,
+              possiblePiiRemaining: false,
+              redactedEntityCounts: {} as never,
+              pipelineVersion: 'redaction-v1',
+            },
+          };
+        }),
+      },
+      consentFor: (patientId) => patients.listConsent(patientId),
+      log: (event) => events.push(event),
+    });
+
+    const [outcome] = await worker.poll(1);
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'ai_not_permitted' });
+    expect(acknowledged).toEqual(['receipt-0']);
+  });
+});
+
+/**
+ * A record being erased while a job runs.
+ *
+ * The grant check does not cover this on its own: deletion revokes grants at
+ * the end, so there is a window where a record is being emptied and still looks
+ * reachable. A summary written in that window recreates the clinical content of
+ * a record somebody deleted, behind a sweep that has already passed.
+ */
+describe('a record being deleted', () => {
+  const beginDeletion = async (): Promise<void> => {
+    await patients.beginDeletion({
+      patientId: PATIENT,
+      requestedByAccountId: OWNER,
+      requestedAt: '2026-09-08T10:15:00.000Z',
+    });
+  };
+
+  it('is never processed at all', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+    await beginDeletion();
+
+    const documentProcessor = processor();
+    const outcome = await buildWorker(documentProcessor).handle(job());
+
+    expect(documentProcessor.process).not.toHaveBeenCalled();
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'record_deleting' });
+  });
+
+  it('writes nothing back when the deletion starts mid-run', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const deleteMidRun: DocumentProcessor = {
+      process: vi.fn(async ({ documentId }) => {
+        await beginDeletion();
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'Kidney function is stable.' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      }),
+    };
+
+    const outcome = await buildWorker(deleteMidRun).handle(job());
+
+    expect(outcome).toMatchObject({ result: 'skipped', reason: 'record_deleting' });
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+  });
+
+  /**
+   * Including the no-consent write. That row is the right answer for a record
+   * that still exists, and one more row to clean up in a partition that is
+   * being erased.
+   */
+  it('does not write the no-consent state into a record being erased', async () => {
+    await decide(true, '2026-09-01T00:00:00.000Z');
+
+    const withdrawAndDelete: DocumentProcessor = {
+      process: vi.fn(async ({ documentId }) => {
+        await decide(false, '2026-09-08T10:30:00.000Z');
+        await beginDeletion();
+        return {
+          documentId,
+          processingStatus: 'ready' as const,
+          summary: { overview: 'Kidney function is stable.' },
+          privacy: {
+            redactionApplied: true,
+            possiblePiiRemaining: false,
+            redactedEntityCounts: {} as never,
+            pipelineVersion: 'redaction-v1',
+          },
+        };
+      }),
+    };
+
+    await buildWorker(withdrawAndDelete).handle(job());
+
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({ status: 'processing' });
+    expect(await patients.getSummary(PATIENT, DOCUMENT)).toBeNull();
+  });
 });
 
 describe('re-queuing after the answer changes', () => {

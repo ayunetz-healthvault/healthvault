@@ -5,6 +5,7 @@ import type { AccessRepository } from '../../services/access/AccessRepository.js
 import type { ObjectStore } from '../../services/objects/ObjectStore.js';
 import type { JobQueue } from '../../services/queue/JobQueue.js';
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
+import { permits } from '../../services/consent/policy.js';
 import { beingDeleted, callerOf, notFound } from './shared.js';
 import { requireAccess } from './requireAccess.js';
 
@@ -398,6 +399,123 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       if (processing === null) return reply.code(404).send(notFound('document'));
 
       return reply.send({ processing });
+    },
+  );
+
+  /**
+   * Ask again for a document nobody was allowed to read.
+   *
+   * A document that reached the worker without AI-processing consent — or whose
+   * consent was withdrawn while it ran — ends at `manual_review` with
+   * `ai_not_permitted`. That is a terminal state on purpose: the worker will not
+   * pick it up again, because "no summary yet" and "no summary, by decision"
+   * must not look the same on a screen.
+   *
+   * Consent is not a one-way door, though, and somebody who declines and later
+   * agrees would otherwise have to delete and re-upload the report to get the
+   * summary they have now asked for. This is the way back, and it is deliberately
+   * explicit: a person asks for it, having answered the consent question, rather
+   * than a background job noticing the answer changed and quietly sending pages
+   * to a provider.
+   *
+   * `manage_consent`, not `upload_document`. The action being authorised is
+   * sending this person's document to a summarisation provider, which is the
+   * consent decision itself — a contributor who may add documents does not get
+   * to make it.
+   */
+  app.post(
+    '/v1/patients/:patientId/documents/:documentId/processing/resume',
+    { preHandler: app.authenticate },
+    async (request, reply) => {
+      const params = documentParam.safeParse(request.params);
+      if (!params.success) return reply.code(400).send(invalid('Provide a document id.'));
+
+      const grant = await requireAccess(
+        request,
+        reply,
+        access,
+        params.data.patientId,
+        'manage_consent',
+      );
+      if (grant === null) return reply;
+
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(RECORD_DELETING).send(beingDeleted());
+      }
+
+      const document = await patients.getDocument(params.data.patientId, params.data.documentId);
+      if (document === null) return reply.code(404).send(notFound('document'));
+
+      const processing = await patients.getProcessing(
+        params.data.patientId,
+        params.data.documentId,
+      );
+
+      /**
+       * Only the no-consent case resumes here.
+       *
+       * A document that failed OCR is not waiting for permission, and re-queuing
+       * it would spend another OCR run and another provider call to reach the
+       * same conclusion. A document already `ready` has its summary. Both are
+       * told what state they are actually in rather than being silently ignored.
+       */
+      if (processing === null || processing.failureCode !== 'ai_not_permitted') {
+        return reply.code(409).send({
+          code: 'not_waiting_on_consent' as const,
+          message: 'This document is not waiting on a consent decision.',
+          retryable: false,
+          details: { status: processing?.status ?? 'none' },
+        });
+      }
+
+      /**
+       * The consent question, asked before the job is queued rather than only
+       * by the worker.
+       *
+       * The worker checks again — it has to, because minutes pass — but a resume
+       * that queued a job which the worker was always going to refuse would tell
+       * the person their report was being read when nothing of the sort was
+       * happening.
+       */
+      if (!permits(await patients.listConsent(params.data.patientId), 'ai_processing')) {
+        return reply.code(409).send({
+          code: 'ai_not_permitted' as const,
+          message:
+            'Summarising this record is not permitted. Agree to AI processing first, then ask again.',
+          retryable: false,
+        });
+      }
+
+      const now = new Date().toISOString();
+      await patients.putProcessing(params.data.patientId, {
+        documentId: document.documentId,
+        status: 'queued',
+        // Counted from zero: this is a new decision, not another attempt at a
+        // job that kept failing, and the attempt budget exists for the latter.
+        attempts: 0,
+        updatedAt: now,
+      });
+
+      await queue.enqueue({
+        patientId: params.data.patientId,
+        documentId: document.documentId,
+        pageCount: document.pageCount,
+        attemptToken: `${document.documentId}#resume-${now}`,
+      });
+
+      await patients.appendAudit({
+        eventId: `${now}-processing-resumed`,
+        patientId: params.data.patientId,
+        actorAccountId: grant.accountId,
+        action: 'processing_resumed',
+        entity: 'document',
+        entityId: document.documentId,
+        at: now,
+      });
+
+      return reply.code(202).send({
+        processing: await patients.getProcessing(params.data.patientId, document.documentId),
+      });
     },
   );
 

@@ -96,7 +96,9 @@ export type SkipReason =
   /** Nobody holds an active grant, so there is nobody this result is for. */
   | 'no_active_grant'
   /** Optional AI processing is not permitted for this record. */
-  | 'ai_not_permitted';
+  | 'ai_not_permitted'
+  /** The record is being erased. Nothing may be written back into it. */
+  | 'record_deleting';
 
 export interface JobOutcome {
   readonly job: ProcessingJob;
@@ -176,6 +178,20 @@ export const createDocumentWorker = ({
     if (!(await someoneCanStillSee(patientId))) {
       log({ kind: 'skipped', documentId, reason: 'no_active_grant' });
       return { job, result: 'skipped', reason: 'no_active_grant' };
+    }
+
+    /**
+     * An erasure is under way.
+     *
+     * The grant check above does not cover this: deletion revokes grants at the
+     * end, so there is a window in which a record is being emptied and still
+     * looks reachable. Writing a `processing` row into it during that window
+     * puts a row back into a partition somebody has just asked to have cleared
+     * — and the erasure, having already swept past, reports success.
+     */
+    if ((await patients.getDeletion(patientId)) !== null) {
+      log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+      return { job, result: 'skipped', reason: 'record_deleting' };
     }
 
     /**
@@ -281,7 +297,44 @@ export const createDocumentWorker = ({
        */
       if (!permits(await consentFor(patientId), 'ai_processing')) {
         log({ kind: 'skipped', documentId, reason: 'ai_not_permitted' });
+
+        /**
+         * Written, not just discarded.
+         *
+         * The document was left saying `processing` by the line above that
+         * started this run, and the job is about to be acknowledged — so
+         * without this the record sits at "being read" for ever, with nothing
+         * left in the queue that would ever move it. `manual_review` is the
+         * truthful end state: nothing failed, the original is there to read,
+         * and no summary is coming until somebody changes their mind.
+         *
+         * Guarded by the deletion marker, because the reason consent vanished
+         * mid-run may be that the whole record is being erased — and this write
+         * would put a row back into a partition that has just been swept.
+         */
+        if ((await patients.getDeletion(patientId)) === null) {
+          await patients.putProcessing(patientId, {
+            documentId,
+            status: 'manual_review',
+            attempts: attempt,
+            failureCode: 'ai_not_permitted',
+            updatedAt: new Date().toISOString(),
+          });
+        }
+
         return { job, result: 'skipped', reason: 'ai_not_permitted' };
+      }
+
+      /**
+       * The erasure fence, re-read immediately before the write.
+       *
+       * A deletion that began while the pipeline ran has already swept the
+       * partition. Writing the summary now would recreate the clinical content
+       * of a record somebody deleted, which is the worst version of this bug.
+       */
+      if ((await patients.getDeletion(patientId)) !== null) {
+        log({ kind: 'skipped', documentId, reason: 'record_deleting' });
+        return { job, result: 'skipped', reason: 'record_deleting' };
       }
 
       await patients.putSummary(patientId, {
