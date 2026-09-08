@@ -143,7 +143,41 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       );
       if (grant === null) return reply;
 
-      return reply.send({ documents: await patients.listDocuments(params.data.patientId) });
+      /**
+       * Documents with what is actually happening to each.
+       *
+       * The list used to return the document rows alone, which left a client no
+       * way to tell a queued document from a finished one — and the mobile
+       * client filled that gap by assuming every pulled document was ready.
+       * That made an unfinished or failed report look complete on a second
+       * device, which is worse than showing nothing.
+       *
+       * Three queries for the whole record rather than one per document: a
+       * per-document call is an N+1 walk that gets slower exactly as a record
+       * gets more useful.
+       */
+      const [documents, processing, summaryIds] = await Promise.all([
+        patients.listDocuments(params.data.patientId),
+        patients.listProcessing(params.data.patientId),
+        patients.listSummaryIds(params.data.patientId),
+      ]);
+
+      const stateFor = new Map(processing.map((record) => [record.documentId, record]));
+      const hasSummary = new Set(summaryIds);
+
+      return reply.send({
+        documents: documents.map((document) => ({
+          ...document,
+          /**
+           * Absent when the pipeline has never written a state for this
+           * document. Deliberately not defaulted to anything: "we do not know"
+           * is a real answer, and the client renders it as such rather than
+           * guessing.
+           */
+          processing: stateFor.get(document.documentId) ?? null,
+          hasSummary: hasSummary.has(document.documentId),
+        })),
+      });
     },
   );
 

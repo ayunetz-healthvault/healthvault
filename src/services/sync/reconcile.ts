@@ -1,8 +1,10 @@
 import { apiClient } from '@/services/api/client';
 import { endpoints } from '@/services/api/endpoints';
 import { ApiError } from '@/services/api/errors';
+import { toDocumentSummary } from '@/services/processing/summaryMapper';
+import type { ProcessDocumentResponse } from '@/services/processing/types';
 import type { GrantRole } from '@/types/access';
-import type { MedicalDocument, ParentProfile } from '@/types/domain';
+import type { DocumentSummary, MedicalDocument, ParentProfile } from '@/types/domain';
 
 /**
  * Reading the shared record back.
@@ -34,9 +36,42 @@ export interface RemotePatient {
 export interface PulledRecords {
   readonly patients: { patient: RemotePatient; role: GrantRole }[];
   readonly documentsByPatient: Record<string, MedicalDocument[]>;
+  /**
+   * Summaries fetched during this pull, keyed by the server's document id.
+   *
+   * Only the ones this device did not already hold. A document whose status
+   * says `ready` is one somebody will tap expecting to read something, so the
+   * content is fetched here rather than left to fail on the summary screen with
+   * nothing to show and no explanation.
+   */
+  readonly summariesByDocumentId: Record<string, DocumentSummary>;
   /** Patients that were cached and are no longer reachable. */
   readonly removedPatientIds: string[];
 }
+
+export interface PullOptions {
+  /**
+   * Server document ids this device already has a summary for.
+   *
+   * Passed in rather than read from the store so this stays testable without
+   * one, and so a caller can force a refetch by passing nothing.
+   */
+  readonly cachedSummaryDocumentIds?: readonly string[];
+}
+
+/**
+ * The backend's processing vocabulary, mirrored.
+ *
+ * Not imported: the two packages do not share a dependency tree, and the
+ * written API contract is what keeps them in step (see backend/README.md).
+ */
+type RemoteProcessingStatus =
+  | 'awaiting_upload'
+  | 'queued'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  | 'manual_review';
 
 interface RemoteDocument {
   readonly documentId: string;
@@ -47,7 +82,76 @@ interface RemoteDocument {
   readonly pageCount: number;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Null when the pipeline has never written a state for this document. */
+  readonly processing?: {
+    readonly status: RemoteProcessingStatus;
+    /** A code, never a message — see ADR-001. */
+    readonly failureCode?: string | undefined;
+  } | null;
+  readonly hasSummary?: boolean;
 }
+
+interface RemoteSummary {
+  readonly documentId: string;
+  /** The pipeline's output, unchanged — see `SummaryRecord` on the server. */
+  readonly summary: unknown;
+  readonly privacy?: unknown;
+  readonly pipelineVersion: string;
+  readonly createdAt: string;
+}
+
+/**
+ * The backend's processing state, in the app's vocabulary.
+ *
+ * Every branch is written out rather than defaulted, because the default is
+ * what caused the bug this replaces: every pulled document was mapped to
+ * `ready`, so a queued or failed report looked finished on a second device.
+ * Somebody would open it expecting a summary and find nothing — or, worse,
+ * conclude there was nothing to find.
+ */
+const toAppStatus = (
+  remote: RemoteProcessingStatus | null,
+  hasSummary: boolean,
+): MedicalDocument['status'] => {
+  switch (remote) {
+    /**
+     * Another device is still adding pages. It is not *this* device's upload,
+     * but "a document is on its way" is the truthful thing to show, and it is
+     * the one state where the record is not yet complete on the server.
+     */
+    case 'awaiting_upload':
+      return 'uploading';
+    // Uploaded, waiting for a worker. The app's `uploaded` means exactly this.
+    case 'queued':
+      return 'uploaded';
+    case 'processing':
+      return 'processing';
+    case 'failed':
+      return 'failed';
+    // Finished, and no summary is coming. The original is still readable.
+    case 'manual_review':
+      return 'needs_review';
+    case 'ready':
+      /**
+       * `ready` with no summary row is a contradiction the server should not
+       * produce — but a client that trusted it would open an empty summary
+       * screen. Sending the reader to the original instead is the safe
+       * reading of a state that should not exist.
+       */
+      return hasSummary ? 'ready' : 'needs_review';
+    case null:
+    default:
+      /**
+       * No processing record at all: the document exists and nothing has run.
+       * `uploaded` says "it is here, nothing has happened yet", which is true
+       * and claims nothing about a summary. An older server that does not send
+       * the field lands here too, which is the right place for it — a client
+       * talking to a server it does not fully understand should not be the one
+       * announcing that a report is finished.
+       */
+      return 'uploaded';
+  }
+};
 
 /**
  * Maps a server document onto the shape the app already uses.
@@ -56,21 +160,46 @@ interface RemoteDocument {
  * and object keys, not the local URIs the capture flow produced. A document
  * pulled from the server is one to read, and its originals are fetched through
  * the short-lived page URLs when somebody actually looks.
+ *
+ * Nothing else is invented either — which is what this replaces. The status
+ * comes from the server's processing record, `summaryId` is set only when a
+ * summary exists, and progress reads complete only when the upload is.
  */
-const toDocument = (remote: RemoteDocument): MedicalDocument => ({
-  id: remote.documentId,
-  parentId: remote.parentId,
-  title: remote.title,
-  category: remote.category as MedicalDocument['category'],
-  documentDate: remote.documentDate,
-  pages: [],
-  status: 'ready',
-  uploadProgress: 100,
-  summaryId: null,
-  failureReason: null,
-  createdAt: remote.createdAt,
-  updatedAt: remote.updatedAt,
-});
+const toDocument = (remote: RemoteDocument): MedicalDocument => {
+  const hasSummary = remote.hasSummary ?? false;
+  const status = toAppStatus(remote.processing?.status ?? null, hasSummary);
+
+  return {
+    id: remote.documentId,
+    parentId: remote.parentId,
+    title: remote.title,
+    category: remote.category as MedicalDocument['category'],
+    documentDate: remote.documentDate,
+    pages: [],
+    status,
+    /**
+     * Only a document past the upload stage is fully uploaded. Reporting 100%
+     * for one another phone is still sending is the same lie in a smaller box
+     * — and this device knows nothing about that upload's real progress, so
+     * the honest number is the one it can defend.
+     */
+    uploadProgress: status === 'uploading' ? 0 : 100,
+    /**
+     * The document id, because summaries are keyed by document on the server.
+     * Null when there is none: a client that always set an id would send a
+     * screen looking for a summary that was never written.
+     */
+    summaryId: hasSummary ? remote.documentId : null,
+    /**
+     * The failure *code*, never a message. The server deliberately sends no
+     * prose here, because a pipeline error can quote the text it was reading;
+     * the screen turns the code into something a person can act on.
+     */
+    failureReason: remote.processing?.failureCode ?? null,
+    createdAt: remote.createdAt,
+    updatedAt: remote.updatedAt,
+  };
+};
 
 /** Maps a server patient onto the local profile shape. */
 export const toParentProfile = (
@@ -107,20 +236,33 @@ export const toParentProfile = (
  * which of them have gone. Passing it in rather than reading a store keeps this
  * function pure enough to test against a fake server.
  */
-export const pullRecords = async (cachedPatientIds: string[]): Promise<PulledRecords> => {
+export const pullRecords = async (
+  cachedPatientIds: string[],
+  options: PullOptions = {},
+): Promise<PulledRecords> => {
   const { patients } = await apiClient.get<{
     patients: { patient: RemotePatient; role: GrantRole }[];
   }>(endpoints.patients.list());
 
+  const alreadyHeld = new Set(options.cachedSummaryDocumentIds ?? []);
   const reachable = new Set(patients.map((entry) => entry.patient.patientId));
   const documentsByPatient: Record<string, MedicalDocument[]> = {};
+  const summariesByDocumentId: Record<string, DocumentSummary> = {};
 
   for (const { patient } of patients) {
     try {
       const { documents } = await apiClient.get<{ documents: RemoteDocument[] }>(
         endpoints.documents.listForPatient(patient.patientId),
       );
-      documentsByPatient[patient.patientId] = documents.map(toDocument);
+      const mapped = documents.map(toDocument);
+      documentsByPatient[patient.patientId] = mapped;
+
+      for (const document of mapped) {
+        if (document.status !== 'ready' || alreadyHeld.has(document.id)) continue;
+
+        const summary = await pullSummary(patient.patientId, document);
+        if (summary !== null) summariesByDocumentId[document.id] = summary;
+      }
     } catch (error) {
       /**
        * One record failing does not fail the sync.
@@ -141,6 +283,43 @@ export const pullRecords = async (cachedPatientIds: string[]): Promise<PulledRec
   return {
     patients: patients.filter((entry) => reachable.has(entry.patient.patientId)),
     documentsByPatient,
+    summariesByDocumentId,
     removedPatientIds: cachedPatientIds.filter((id) => !reachable.has(id)),
   };
+};
+
+/**
+ * Fetches one document's summary, or returns null if there is nothing to show.
+ *
+ * A missing or malformed summary is not allowed to fail the pull. The document
+ * still arrives, still says what state it is in, and the screen still offers
+ * the original — which is more useful than a sync that stops on one bad row.
+ * The `ready` status is not downgraded here: whether a summary *exists* is the
+ * server's answer, and this device failing to read it is a different fact.
+ */
+const pullSummary = async (
+  patientId: string,
+  document: MedicalDocument,
+): Promise<DocumentSummary | null> => {
+  try {
+    const { summary } = await apiClient.get<{ summary: RemoteSummary }>(
+      endpoints.summaries.getForDocument(patientId, document.id),
+    );
+
+    /**
+     * Reuses the mapper the upload path already validates through, rather than
+     * a second, laxer reader. The stored record keeps the pipeline's output
+     * unchanged, so it is the same shape that mapper was written for.
+     */
+    const response = {
+      documentId: document.id,
+      processingStatus: 'ready',
+      summary: summary.summary,
+      privacy: summary.privacy,
+    } as ProcessDocumentResponse;
+
+    return toDocumentSummary(response, document);
+  } catch {
+    return null;
+  }
 };

@@ -288,6 +288,9 @@ export const createDocumentWorker = ({
         documentId,
         summary: response.summary,
         pipelineVersion: response.privacy.pipelineVersion,
+        // Kept with the summary so any device that reads it later can show the
+        // same redaction caveat, not just the one that uploaded the pages.
+        privacy: response.privacy,
         createdAt: new Date().toISOString(),
       });
 

@@ -99,6 +99,18 @@ export interface SummaryRecord {
    */
   readonly summary: unknown;
   readonly pipelineVersion: string;
+  /**
+   * The privacy result for the run that produced this summary.
+   *
+   * Stored rather than recomputed because it is a fact about *that* run: how
+   * many identifiers were removed, and whether the leakage check still saw
+   * something. A second device reading this record has to be able to show the
+   * same caveat as the device that uploaded it — a redaction notice that
+   * appears on one phone and not another is worse than none.
+   *
+   * Counts and flags only; the entities themselves are never stored.
+   */
+  readonly privacy?: unknown;
   readonly createdAt: string;
   /**
    * Increments when the pipeline produces a new summary for this document.

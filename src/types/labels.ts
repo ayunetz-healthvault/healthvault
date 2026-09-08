@@ -41,6 +41,9 @@ export const PROCESSING_STATUS_LABELS: Record<ProcessingStatus, string> = {
   processing: 'Reading document',
   ready: 'Ready',
   failed: 'Needs attention',
+  // Not "failed": nothing went wrong that retrying would fix. The document is
+  // there and the person can open it; what is missing is the summary.
+  needs_review: 'Open the original',
 };
 
 export const FOLLOW_UP_KIND_LABELS: Record<FollowUpKind, string> = {

@@ -32,7 +32,13 @@ const STATUS_TONES = {
   processing: 'info',
   ready: 'success',
   failed: 'danger',
-} as const satisfies Record<ProcessingStatus, 'neutral' | 'info' | 'success' | 'danger'>;
+  // Amber, not red. Nothing is broken — there is simply no summary, and the
+  // person can still open what the clinician wrote.
+  needs_review: 'warning',
+} as const satisfies Record<
+  ProcessingStatus,
+  'neutral' | 'info' | 'success' | 'danger' | 'warning'
+>;
 
 export function DocumentCard({ document, onPress, testID }: DocumentCardProps): React.JSX.Element {
   const meta = `${formatDate(document.documentDate)} · ${pluralise(document.pages.length, 'page')}`;

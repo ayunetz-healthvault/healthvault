@@ -7,6 +7,7 @@ import { MOCK_DOCUMENTS, MOCK_SUMMARIES } from '@/mocks/documents';
 import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
 import { activeVaultStorage } from '@/services/storage/activeVault';
+import { mergeDocuments } from '@/services/sync/mergeDocuments';
 import type {
   DocumentSummary,
   FollowUp,
@@ -45,6 +46,21 @@ import { createId } from '@/utils/id';
  * design, nothing to read.
  */
 
+/**
+ * A completed pull, in the shape the store applies.
+ *
+ * Deliberately not `PulledRecords`: that type carries the server's patient
+ * payload, and translating it into profiles is the caller's job — the store
+ * should not have to know what a `RemotePatient` looks like.
+ */
+export interface AppliedPull {
+  readonly parents: ParentProfile[];
+  readonly documentsByPatient: Record<string, MedicalDocument[]>;
+  /** Keyed by the server's document id. */
+  readonly summaries: Record<string, DocumentSummary>;
+  readonly removedPatientIds: string[];
+}
+
 interface VaultState {
   parents: ParentProfile[];
   documents: MedicalDocument[];
@@ -72,6 +88,13 @@ interface VaultState {
 
   // --- Documents ------------------------------------------------------------
   addDocument: (document: MedicalDocument) => void;
+  /**
+   * Records the id the server issued for a document this device uploaded.
+   *
+   * Without it the next pull sees an id it does not recognise and files a
+   * second copy of the same report.
+   */
+  attachRemoteId: (id: string, remoteId: string) => void;
   updateDocumentStatus: (
     id: string,
     status: ProcessingStatus,
@@ -81,6 +104,16 @@ interface VaultState {
 
   // --- Summaries ------------------------------------------------------------
   addSummary: (summary: DocumentSummary) => void;
+
+  // --- Sync -----------------------------------------------------------------
+  /**
+   * Applies what the server returned to what this device holds.
+   *
+   * The merge rules live in `mergeDocuments`, deliberately outside the store:
+   * deciding whether the phone or the server is right about a given document is
+   * the part worth testing, and it does not need a store to be tested.
+   */
+  applyPulledRecords: (pulled: AppliedPull) => void;
 
   // --- Follow-ups -----------------------------------------------------------
   addFollowUp: (draft: FollowUpDraft) => FollowUp;
@@ -181,6 +214,11 @@ export const useVaultStore = create<VaultState>()(
       // --- Documents ----------------------------------------------------------
       addDocument: (document) => set((state) => ({ documents: [document, ...state.documents] })),
 
+      attachRemoteId: (id, remoteId) =>
+        set((state) => ({
+          documents: state.documents.map((doc) => (doc.id === id ? { ...doc, remoteId } : doc)),
+        })),
+
       updateDocumentStatus: (id, status, extra = {}) =>
         set((state) => ({
           documents: state.documents.map((doc) =>
@@ -222,6 +260,57 @@ export const useVaultStore = create<VaultState>()(
         })),
 
       // --- Follow-ups ---------------------------------------------------------
+      applyPulledRecords: ({ parents, documentsByPatient, summaries, removedPatientIds }) =>
+        set((state) => {
+          const removed = new Set(removedPatientIds);
+
+          const documents = mergeDocuments({
+            local: state.documents,
+            remoteByPatient: documentsByPatient,
+            removedPatientIds,
+          });
+
+          const keptDocumentIds = new Set(documents.map((doc) => doc.id));
+          const byId = new Map(state.parents.map((parent) => [parent.id, parent]));
+          for (const parent of parents) byId.set(parent.id, parent);
+          for (const patientId of removed) byId.delete(patientId);
+
+          /**
+           * A pulled summary is filed under the id the *local* record uses,
+           * which is not always the server's — a document this device uploaded
+           * keeps its local id. Looking it up here rather than at the fetch
+           * keeps `reconcile` free of the store.
+           */
+          const localIdFor = new Map(
+            documents.flatMap((doc) => (doc.remoteId ? [[doc.remoteId, doc.id] as const] : [])),
+          );
+
+          const pulledSummaries = Object.entries(summaries).flatMap(
+            ([remoteDocumentId, summary]) => {
+              const documentId = localIdFor.get(remoteDocumentId) ?? remoteDocumentId;
+              if (!keptDocumentIds.has(documentId)) return [];
+              return [{ ...summary, documentId }];
+            },
+          );
+
+          const pulledFor = new Set(pulledSummaries.map((summary) => summary.documentId));
+
+          return {
+            parents: [...byId.values()],
+            documents,
+            summaries: [
+              // A revoked or deleted record takes its summaries with it, and a
+              // freshly pulled summary replaces the copy this device had.
+              ...state.summaries.filter(
+                (summary) =>
+                  keptDocumentIds.has(summary.documentId) && !pulledFor.has(summary.documentId),
+              ),
+              ...pulledSummaries,
+            ],
+            followUps: state.followUps.filter((followUp) => !removed.has(followUp.parentId)),
+          };
+        }),
+
       addFollowUp: (draft) => {
         const timestamp = nowIso();
         const followUp: FollowUp = {

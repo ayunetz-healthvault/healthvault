@@ -6,6 +6,7 @@ import {
   Avatar,
   Badge,
   Button,
+  Callout,
   Card,
   DocumentCard,
   EmptyState,
@@ -14,6 +15,7 @@ import {
   SectionHeader,
   Text,
 } from '@/components';
+import { useVaultRefresh } from '@/hooks/useVaultRefresh';
 import {
   selectDocumentTimeline,
   selectFollowUpsForParent,
@@ -36,6 +38,7 @@ export default function ParentProfileScreen(): React.JSX.Element {
   const router = useRouter();
 
   const vault = useVaultSnapshot();
+  const refresh = useVaultRefresh();
 
   const parent = id ? selectParent(vault, id) : undefined;
 
@@ -62,6 +65,8 @@ export default function ParentProfileScreen(): React.JSX.Element {
   return (
     <Screen
       testID="parent-profile"
+      onRefresh={refresh.onRefresh}
+      refreshing={refresh.refreshing}
       footer={
         <Button
           label="Add a document"
@@ -71,6 +76,10 @@ export default function ParentProfileScreen(): React.JSX.Element {
         />
       }
     >
+      {refresh.notice === null ? null : (
+        <Callout tone="warning" message={refresh.notice} testID="parent-sync-notice" />
+      )}
+
       <View style={styles.header}>
         <Avatar name={parent.fullName} color={parent.avatarColor} size={80} />
         <Text variant="title" align="center" style={styles.name}>

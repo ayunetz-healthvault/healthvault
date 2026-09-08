@@ -98,9 +98,19 @@ export interface PatientRecordRepository {
 
   putProcessing(patientId: PatientId, processing: ProcessingRecord): Promise<void>;
   getProcessing(patientId: PatientId, documentId: string): Promise<ProcessingRecord | null>;
+  /**
+   * Every document's processing state, in one query.
+   *
+   * So listing a record's documents can report what is actually happening to
+   * each without a request per document. The alternative — asking per document
+   * — is an N+1 walk that gets slower exactly as a record gets more useful.
+   */
+  listProcessing(patientId: PatientId): Promise<ProcessingRecord[]>;
 
   putSummary(patientId: PatientId, summary: SummaryRecord): Promise<void>;
   getSummary(patientId: PatientId, documentId: string): Promise<SummaryRecord | null>;
+  /** Which documents have a summary, without fetching the summaries. */
+  listSummaryIds(patientId: PatientId): Promise<string[]>;
 
   putFollowUp(patientId: PatientId, followUp: FollowUpRecord): Promise<void>;
   listFollowUps(patientId: PatientId): Promise<FollowUpRecord[]>;
@@ -198,10 +208,17 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     getProcessing: (patientId, documentId) =>
       get<ProcessingRecord>(patientId, patientProcessingSk(documentId)),
 
+    listProcessing: (patientId) => queryPrefix<ProcessingRecord>(patientId, 'PROCESSING#'),
+
     putSummary: (patientId, summary) =>
       put(patientId, patientSummarySk(summary.documentId), { ...summary }),
     getSummary: (patientId, documentId) =>
       get<SummaryRecord>(patientId, patientSummarySk(documentId)),
+
+    async listSummaryIds(patientId) {
+      const summaries = await queryPrefix<SummaryRecord>(patientId, 'SUMMARY#');
+      return summaries.map((summary) => summary.documentId);
+    },
 
     async putFollowUp(patientId, followUp) {
       await put(patientId, patientFollowUpSk(followUp.dueDate, followUp.followUpId), {

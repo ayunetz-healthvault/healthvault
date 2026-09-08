@@ -3,6 +3,7 @@ import { StyleSheet, View } from 'react-native';
 
 import {
   Button,
+  Callout,
   Card,
   DemoNotice,
   EmptyState,
@@ -12,6 +13,7 @@ import {
   SectionHeader,
   Text,
 } from '@/components';
+import { useVaultRefresh } from '@/hooks/useVaultRefresh';
 import { selectAttentionItems, type AttentionItem } from '@/state/attention';
 import { useSessionStore } from '@/state/sessionStore';
 import {
@@ -46,6 +48,7 @@ export default function CaregiverHomeScreen(): React.JSX.Element {
   const firstName = user?.fullName?.split(' ')[0] ?? null;
 
   const vault = useVaultSnapshot();
+  const refresh = useVaultRefresh();
   const attention = selectAttentionItems(vault);
   const upcoming = selectUpcomingFollowUps(vault, UPCOMING_LIMIT);
 
@@ -60,7 +63,11 @@ export default function CaregiverHomeScreen(): React.JSX.Element {
 
   if (vault.parents.length === 0) {
     return (
-      <Screen testID="care-home-empty">
+      <Screen
+        testID="care-home-empty"
+        onRefresh={refresh.onRefresh}
+        refreshing={refresh.refreshing}
+      >
         {header}
         <Greeting firstName={firstName} />
         <EmptyState
@@ -76,9 +83,13 @@ export default function CaregiverHomeScreen(): React.JSX.Element {
   }
 
   return (
-    <Screen testID="care-home">
+    <Screen testID="care-home" onRefresh={refresh.onRefresh} refreshing={refresh.refreshing}>
       {header}
       <Greeting firstName={firstName} />
+
+      {refresh.notice === null ? null : (
+        <Callout tone="warning" message={refresh.notice} testID="care-home-sync-notice" />
+      )}
 
       <SectionHeader
         title="Your family"

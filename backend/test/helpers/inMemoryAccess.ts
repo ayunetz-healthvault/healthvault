@@ -219,12 +219,22 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
     async getProcessing(patientId, documentId) {
       return processing.get(key(patientId, documentId)) ?? null;
     },
+    async listProcessing(patientId) {
+      return [...processing.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
+    },
 
     async putSummary(patientId, summary) {
       summaries.set(key(patientId, summary.documentId), summary);
     },
     async getSummary(patientId, documentId) {
       return summaries.get(key(patientId, documentId)) ?? null;
+    },
+    async listSummaryIds(patientId) {
+      return [...summaries.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value.documentId);
     },
 
     async putFollowUp(patientId, followUp) {

@@ -1,0 +1,217 @@
+import { pullIntoVault } from './pullService';
+
+import { setTokenProvider } from '@/services/api/client';
+import { selectSummaryForDocument, useVaultStore, type VaultSnapshot } from '@/state/vaultStore';
+
+/**
+ * The journey the review asked for, end to end and synthetic throughout.
+ *
+ * One family record, three reports in three different states, and a *second*
+ * account that has never seen any of them. What that account is shown after a
+ * refresh is the whole question: a queued report must not read as finished, a
+ * failed one must not read as finished, and the one that genuinely finished
+ * must be openable — not a status badge with nothing behind it.
+ *
+ * Then the grant is withdrawn, and the same refresh has to take the records
+ * away again.
+ */
+
+jest.mock('@/config/env', () => ({
+  ...jest.requireActual('@/config/env'),
+  isBackendEnabled: () => true,
+  isDemoBuild: () => false,
+}));
+
+const fetchMock = jest.fn();
+
+const patient = {
+  patient: {
+    patientId: 'pat_1',
+    fullName: 'Meera Nair',
+    relationship: 'mother',
+    city: 'Kochi',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  },
+  role: 'viewer' as const,
+};
+
+const document = (
+  documentId: string,
+  title: string,
+  processing: { status: string; failureCode?: string } | null,
+  hasSummary = false,
+) => ({
+  documentId,
+  parentId: 'pat_1',
+  title,
+  category: 'lab_report',
+  documentDate: '2026-09-01',
+  pageCount: 2,
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+  processing,
+  hasSummary,
+});
+
+const summaryBody = {
+  documentId: 'doc_done',
+  pipelineVersion: 'test-1',
+  createdAt: '2026-09-02T00:00:00.000Z',
+  summary: {
+    overview: 'Kidney function is stable.',
+    plainLanguageSummary: 'The numbers look much the same as last time.',
+    findings: [],
+    medicines: [],
+    instructions: [],
+    questionsForDoctor: [],
+    recommendedDoctorCategory: 'nephrologist',
+    confidence: 0.9,
+    pipelineVersion: 'test-1',
+  },
+  privacy: {
+    redactionApplied: true,
+    possiblePiiRemaining: false,
+    redactedEntityCounts: { patientName: 2 },
+    pipelineVersion: 'test-1',
+  },
+};
+
+/** A whole synthetic server: the patient list, its documents, its summaries. */
+const serve = (options: { reachable: boolean }): void => {
+  fetchMock.mockImplementation(async (requested: string) => {
+    const url = String(requested);
+    const ok = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => JSON.stringify(body),
+    });
+
+    if (url.endsWith('/v1/patients')) return ok({ patients: options.reachable ? [patient] : [] });
+
+    if (url.endsWith('/documents')) {
+      if (!options.reachable) {
+        return {
+          ok: false,
+          status: 404,
+          headers: { get: () => null },
+          text: async () => JSON.stringify({ code: 'not_found' }),
+        };
+      }
+      return ok({
+        documents: [
+          document('doc_queued', 'Chest X-ray', { status: 'queued' }),
+          document('doc_failed', 'Old prescription', {
+            status: 'failed',
+            failureCode: 'ocr_failed',
+          }),
+          document('doc_done', 'Kidney panel', { status: 'ready' }, true),
+        ],
+      });
+    }
+
+    if (url.endsWith('/doc_done/summary')) return ok({ summary: summaryBody });
+
+    return {
+      ok: false,
+      status: 404,
+      headers: { get: () => null },
+      text: async () => JSON.stringify({ code: 'not_found' }),
+    };
+  });
+};
+
+const snapshot = (): VaultSnapshot => {
+  const state = useVaultStore.getState();
+  return {
+    parents: state.parents,
+    documents: state.documents,
+    summaries: state.summaries,
+    followUps: state.followUps,
+  };
+};
+
+beforeEach(() => {
+  fetchMock.mockReset();
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  setTokenProvider(async () => 'token');
+  useVaultStore.getState().clearAll();
+});
+
+describe('a second account refreshing a shared record', () => {
+  it('brings in the record and every document in it', async () => {
+    serve({ reachable: true });
+
+    const result = await pullIntoVault();
+
+    expect(result).toMatchObject({ outcome: 'applied', patients: 1, documents: 3 });
+    expect(snapshot().parents.map((parent) => parent.fullName)).toEqual(['Meera Nair']);
+  });
+
+  it('shows each report in the state the server says it is in', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    const byId = new Map(snapshot().documents.map((item) => [item.id, item]));
+
+    expect(byId.get('doc_queued')).toMatchObject({ status: 'uploaded', summaryId: null });
+    expect(byId.get('doc_failed')).toMatchObject({ status: 'failed', summaryId: null });
+    expect(byId.get('doc_done')).toMatchObject({ status: 'ready', summaryId: 'doc_done' });
+  });
+
+  /**
+   * The check the review asked for by name. A `ready` badge is worth nothing
+   * if the screen behind it has no summary to render.
+   */
+  it('can actually open the completed summary', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    const summary = selectSummaryForDocument(snapshot(), 'doc_done');
+
+    expect(summary).toBeDefined();
+    expect(summary?.overview).toBe('Kidney function is stable.');
+  });
+
+  /** Relaunch, or simply pull again: the same records, not twice as many. */
+  it('is unchanged by a second refresh', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+    await pullIntoVault();
+
+    expect(snapshot().documents).toHaveLength(3);
+    expect(snapshot().summaries).toHaveLength(1);
+  });
+
+  it('takes the record away once access is withdrawn', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    serve({ reachable: false });
+    await pullIntoVault();
+
+    const after = snapshot();
+    expect(after.parents).toEqual([]);
+    expect(after.documents).toEqual([]);
+    // The summary goes with it. A revoked record that leaves its summary behind
+    // has not really been revoked.
+    expect(after.summaries).toEqual([]);
+  });
+
+  /**
+   * A refresh that could not reach the server changes nothing — and says so,
+   * so the screen can tell the user what they are looking at may be stale
+   * rather than silently presenting yesterday's records as today's.
+   */
+  it('leaves the cached records alone when the server cannot be reached', async () => {
+    serve({ reachable: true });
+    await pullIntoVault();
+
+    fetchMock.mockRejectedValue(new Error('offline'));
+    const result = await pullIntoVault();
+
+    expect(result.outcome).toBe('failed');
+    expect(snapshot().documents).toHaveLength(3);
+  });
+});

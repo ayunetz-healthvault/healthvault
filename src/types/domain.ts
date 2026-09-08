@@ -77,10 +77,44 @@ export type DocumentCategory =
   | 'other';
 
 export type ProcessingStatus =
-  'draft' | 'uploading' | 'uploaded' | 'processing' | 'ready' | 'failed';
+  | 'draft'
+  | 'uploading'
+  | 'uploaded'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  /**
+   * The pipeline stopped and a person has to look at the original.
+   *
+   * Distinct from `failed`, which means something went wrong and retrying may
+   * help. This means the run finished and produced no usable summary — an
+   * unreadable page, or AI processing that was not agreed to. Retrying reads
+   * the same bytes and reaches the same conclusion.
+   *
+   * The backend has always had this state. The client did not, so a pulled
+   * document in it had nowhere honest to land.
+   */
+  | 'needs_review';
 
 export interface MedicalDocument {
   readonly id: string;
+  /**
+   * The server's id for this same document, once it has one.
+   *
+   * A document is created locally, with a local id, before anything is
+   * uploaded — the record has to survive the app being killed mid-capture. The
+   * server then issues its own id, and that is the one the record is known by
+   * everywhere else: every other device, and every later pull.
+   *
+   * Both are kept because both are real. Dropping the local id would orphan the
+   * pages and the upload session that reference it; dropping the server id
+   * would make the next pull look like a *different* document and file a
+   * duplicate next to the original.
+   *
+   * Null on a document that has never reached a server, and on one pulled from
+   * a server (where `id` already is the server's).
+   */
+  remoteId?: string | null;
   readonly parentId: string;
   title: string;
   category: DocumentCategory;

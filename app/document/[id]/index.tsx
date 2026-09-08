@@ -32,6 +32,7 @@ import {
   DOCUMENT_CATEGORY_LABELS,
   PROCESSING_STATUS_LABELS,
 } from '@/types/labels';
+import type { ProcessingStatus } from '@/types/domain';
 import { formatDate, formatDateTime } from '@/utils/date';
 import { pluralise } from '@/utils/format';
 
@@ -43,6 +44,71 @@ import { pluralise } from '@/utils/format';
  * first two cards; the findings and medicines are there when they sit down with
  * it properly. The disclaimer sits above the summary, not buried at the bottom.
  */
+/**
+ * What a document with no summary should say, per state.
+ *
+ * There used to be one line here — "This document has not been summarised yet"
+ * — shown for every state including the two where it is false. A report the
+ * pipeline gave up on is not summarised *yet*; it is not going to be, and
+ * telling someone to wait for it means they wait instead of opening the
+ * original or asking the clinic for another copy.
+ *
+ * `offerStatus` is the other half. The status screen starts processing, so
+ * offering it for a document that has finished — failed, or set aside for a
+ * person — invites a pointless re-run of a pipeline that will reach the same
+ * answer.
+ */
+const NO_SUMMARY_STATE: Record<
+  ProcessingStatus,
+  { tone: 'info' | 'warning'; message: string; offerStatus: boolean }
+> = {
+  draft: {
+    tone: 'info',
+    message: 'This document has not been sent for reading yet.',
+    offerStatus: true,
+  },
+  uploading: {
+    tone: 'info',
+    message: 'The pages are still being sent. This can continue in the background.',
+    offerStatus: true,
+  },
+  uploaded: {
+    tone: 'info',
+    message: 'The pages have arrived and are waiting to be read.',
+    offerStatus: true,
+  },
+  processing: {
+    tone: 'info',
+    message: 'This document is being read now. It usually takes a minute or two.',
+    offerStatus: true,
+  },
+  ready: {
+    /**
+     * Ready, and yet there is no summary on this device.
+     *
+     * Either the summary has not been fetched yet or it could not be read. Both
+     * are worth saying plainly rather than showing an empty screen — and
+     * neither is a reason to hide the original.
+     */
+    tone: 'warning',
+    message:
+      'The summary for this document is not on this phone yet. Pull down on the previous screen to fetch it.',
+    offerStatus: false,
+  },
+  failed: {
+    tone: 'warning',
+    message:
+      'This document could not be read, so there is no summary. The pages you added are still here to open.',
+    offerStatus: true,
+  },
+  needs_review: {
+    tone: 'warning',
+    message:
+      'This one needs a person to read it — the pages could not be summarised. Open the original below.',
+    offerStatus: false,
+  },
+};
+
 export default function DocumentSummaryScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -124,17 +190,20 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
       {!summary ? (
         <>
           <Callout
-            tone="info"
+            tone={NO_SUMMARY_STATE[document.status].tone}
             title={PROCESSING_STATUS_LABELS[document.status]}
-            message="This document has not been summarised yet."
+            message={NO_SUMMARY_STATE[document.status].message}
+            testID="document-no-summary"
           />
-          <Button
-            label="Check processing status"
-            variant="secondary"
-            onPress={() => router.push(`/document/${document.id}/processing`)}
-            style={styles.statusButton}
-            testID="document-check-status"
-          />
+          {NO_SUMMARY_STATE[document.status].offerStatus ? (
+            <Button
+              label="Check processing status"
+              variant="secondary"
+              onPress={() => router.push(`/document/${document.id}/processing`)}
+              style={styles.statusButton}
+              testID="document-check-status"
+            />
+          ) : null}
         </>
       ) : (
         <>
