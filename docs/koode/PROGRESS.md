@@ -13,8 +13,8 @@ never hidden by closing the parent story.
 | --- | --- | --- |
 | KOO-00 | Implemented locally | Baseline reconciled against `ecb38d2`; see below |
 | KOO-01 | Implemented locally | Both shells built and captured; native device checks open |
-| KOO-02 | Not started | |
-| KOO-03 | Not started | |
+| KOO-02 | Implemented locally | Cognito wired and tested against a faked provider; live pool unverified |
+| KOO-03 | In progress | Model, policy, routes and migration done and tested; `/v1/parents` and `/v1/documents` not yet moved; DynamoDB semantics unrun here |
 | KOO-04 | Not started | |
 | KOO-05 | Not started | |
 | KOO-06 | Not started | |
@@ -234,7 +234,88 @@ stating plainly what web preview does and does not prove.
 
 ### Next precise action
 
-KOO-02: replace the mock auth branches with a configured Cognito integration,
-implement expiry/refresh/revocation, and resolve the experience from the
-server's answer rather than a demonstration control. Live Cognito verification
-is blocked with no user pool; everything else is locally testable.
+Superseded — see KOO-02 below.
+
+## KOO-02 — Sign in to a real account and select the correct experience
+
+**Status: Implemented locally.** One acceptance criterion is blocked on a user
+pool; the rest are satisfied and tested.
+
+- **Commit:** `0696131` · **ADR:** `docs/architecture/adr/004-mobile-authentication.md`
+
+### Acceptance criteria
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| Configured Cognito sign-up, verification, sign-in and recovery; demo sessions kept separate | Satisfied in code, **live flow unverified** | `cognitoClient.ts`, `app/(auth)/confirm.tsx`, `app/(auth)/reset-password.tsx`; 27 tests against a faked `fetch` |
+| Expiry, refresh, server-side revocation; credentials cleared on logout | Satisfied | Refresh margin, single in-flight refresh, `GlobalSignOut` before local clear |
+| Parent onboarding establishes their own record; a UI role is not an authorization grant | Satisfied by KOO-03 | `subject: 'me' \| 'someone_else'` on `POST /v1/patients` produces a `self` or `manager` grant |
+| A user can have a self record and helper access without one flag granting everything | Satisfied | Grants are per record; `resolveExperience` reads them and grants nothing |
+| Deep links and private routes protected; live mode never falls back to demo | Satisfied | `useRouteGuard` (10 tests); `assertLiveConfigured` (3 tests) |
+| Backend verifier and dev-issuer safeguards reused; no client secret in the bundle | Satisfied | Verifier untouched; `assertNoClientSecret` throws, asserted |
+
+### Commands actually run
+
+`npm run verify` — pass, 532 tests / 33 suites.
+
+### External gates still unverified
+
+- [ ] A synthetic-account sign-in against a real Cognito user pool. **No pool
+      exists.** Every request shape here is unexercised against AWS.
+- [ ] Pool configuration: `ALLOW_USER_PASSWORD_AUTH`, no client secret, email
+      alias with verification, `name` and `locale` writable. Carried into KOO-14.
+
+### Decisions
+
+- `USER_PASSWORD_AUTH` over hand-written SRP. Hand-rolled crypto in an app
+  holding medical records is a worse risk than a password over verified TLS to
+  its own identity provider; `amazon-cognito-identity-js` is the right way to
+  get SRP, once there is a pool to test it against. ADR-004 § 2.
+- Token expiry is stored from the provider's response, not read from the token's
+  `exp`. The client cannot verify a signature, so nothing that matters may
+  depend on what a token says about itself.
+
+## KOO-03 — Give each parent a shared record with explicit access grants
+
+**Status: In progress.** The model, policy, routes, invitations and migration
+are done and tested. Two things remain: moving `/v1/parents` and
+`/v1/documents` onto patient partitions, and the mobile sharing screens.
+
+- **Commit:** `1f4cd73` · **ADR:** `docs/architecture/adr/005-patient-identity-and-access-grants.md`
+
+### Acceptance criteria
+
+| Criterion | State | Evidence |
+| --- | --- | --- |
+| ADR for patient identity, ownership, actor identity and per-record grants; additive migration | Satisfied | ADR-005; `migrateOwnerToPatientPartitions` deletes nothing |
+| At least owner/self, contributor and read-only; grantor, grantee, scope, status, timestamps; helpers cannot self-grant | Satisfied | `policy.ts`, 19 tests; helper-escalation refused, 3 tests |
+| Expiring single-use invitations through authenticated accounts; a token alone reads nothing | Satisfied | 8 invitation tests including expired, spent, withdrawn and unauthenticated |
+| Caregiver profiles stay usable, no auto-linking by name/phone/email; explicit claim flow defined | Satisfied | Migration grants `manager`; auto-linking explicitly not implemented, ADR-005 § 6 |
+| Grants checked on every record API, URL issuance, sync, task action and queued job | **Partly** | Enforced on every route in `access.ts`; `/v1/parents` and `/v1/documents` still owner-partitioned — next slice |
+| Revocation denies subsequent operations; bounded lifetime of issued links and cached copies documented | Satisfied | Revocation tests use the *same* token afterwards; limits stated in ADR-005 |
+| Who added/changed each item; audit free of clinical text; revocation view and denied state | **Partly** | `appendAudit` on create/invite/accept/revoke, asserted to carry no name; the revocation *view* is the mobile slice |
+
+### Commands actually run
+
+| Command | Result |
+| --- | --- |
+| `SKIP_OCR_TESTS=1 npm run backend:verify` | pass — **458 passed, 91 skipped** (410/79 before) |
+
+48 new backend tests: 19 policy, 29 routes.
+
+### Baseline failures and skipped checks
+
+The 91 skipped include **13 new tests in `test/integration/access.test.ts`** —
+concurrent self-grant claims, two devices racing to accept one invitation,
+double revocation, the `GSI2` reverse query, hash-only token storage, and the
+migration end to end including its dry run and re-run. These need real DynamoDB
+and **were not run**: the Docker image registry is unreachable in this session,
+so the local stack cannot start. They are written and unrun, and the conditional
+writes they cover are the one part of this story a fake cannot demonstrate.
+
+### Next precise action
+
+KOO-03d: move `/v1/parents` and `/v1/documents` onto patient partitions behind
+`requireAccess`, then build the sharing screens — named helpers, exact
+permissions, pending invitations, revocation — replacing the "not built yet"
+notices now on `app/care/family.tsx` and `app/me/family.tsx`.
