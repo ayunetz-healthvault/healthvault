@@ -1,3 +1,6 @@
+import { File } from 'expo-file-system';
+
+import { createUploadSessions, type UploadSession } from './uploadSession';
 import { apiClient } from '../api/client';
 import { endpoints } from '../api/endpoints';
 import { ApiError } from '../api/errors';
@@ -6,35 +9,43 @@ import { config, isBackendEnabled } from '@/config/env';
 import type { DocumentPage } from '@/types/domain';
 
 /**
- * Secure document upload.
+ * Getting a document from the phone into the record.
  *
- * The production design is a **presigned S3 PUT**, and the mock below imitates
- * it step for step so the swap is mechanical:
+ *   1. POST /v1/patients/{id}/documents           the record, first, so nothing
+ *                                                 is uploaded with nowhere to
+ *                                                 live
+ *   2. POST .../uploads                           one presigned PUT per page
+ *   3. PUT <presigned url>                        phone → object store, direct
+ *   4. POST .../uploads/complete                  verify, then enqueue
  *
- *   1. POST /v1/documents/{id}/uploads  ->  Lambda signs one PUT URL per page
- *                                           against the SSE-KMS bucket in
- *                                           ap-south-1, TTL ~15 minutes.
- *   2. PUT <presigned url>              ->  the file goes phone -> S3 directly.
- *                                           Bytes never transit our compute,
- *                                           which is the whole point.
- *   3. POST .../uploads/complete        ->  Lambda records the object keys and
- *                                           pushes a job onto SQS.
+ * Bytes never transit the API. That removes a whole class of accident — no scan
+ * of a prescription in a request log, a heap dump or a proxy cache — and means
+ * the client holds no credential that can write anywhere but the keys it was
+ * given.
  *
- * The client therefore never holds AWS credentials and never needs an S3 SDK.
+ * ## What makes this resumable
  *
- * TODO(backend): replace `mockUpload` with `fetch(url, { method: 'PUT', body })`
- * using an `expo-file-system` upload task so progress is real and the transfer
- * survives backgrounding.
+ * Three things, and none of them is retry logic:
+ *
+ * - **The bytes are somewhere durable.** `protectedFiles` moved them out of the
+ *   picker's cache at capture time, so they are still there tomorrow.
+ * - **The server's document id is recorded** as soon as it exists. A locally
+ *   generated id is not a cloud id, and treating it as one files the resumed
+ *   pages against a document that was never created.
+ * - **Each page is marked as it lands.** A resume asks for URLs for the pages
+ *   that are missing, not for all of them.
+ *
+ * Together they mean the app can be killed at any point and the next launch
+ * picks up where it stopped, without re-uploading or duplicating anything.
  */
 
 export interface PresignedTarget {
-  pageId: string;
-  /** The S3 object key the page will live at. */
-  objectKey: string;
-  uploadUrl: string;
-  /** Headers S3 requires the PUT to echo — includes the KMS header in prod. */
+  page: number;
+  key: string;
+  url: string;
+  expiresInSeconds: number;
+  /** Headers the store requires the PUT to echo for the signature to match. */
   headers: Record<string, string>;
-  expiresAt: string;
 }
 
 export interface UploadProgress {
@@ -42,167 +53,201 @@ export interface UploadProgress {
   percent: number;
   pagesCompleted: number;
   pagesTotal: number;
-  currentPageId: string | null;
+  currentPage: number | null;
 }
 
 export interface UploadResult {
-  documentId: string;
-  objectKeys: string[];
-  /** SQS message id in production; a mock id here. */
-  processingJobId: string;
+  /** The server's id. Everything after this point uses it, not the local one. */
+  serverDocumentId: string;
+  pagesUploaded: number;
+  queued: boolean;
 }
 
 export type ProgressListener = (progress: UploadProgress) => void;
 
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 /**
- * Deterministic object key. Prefixed by user then parent so an S3 lifecycle
- * rule (and the account-deletion job) can address one family's data by prefix.
+ * The page limit, in one place.
+ *
+ * The backend enforces ten and rejects anything else. Duplicating the number
+ * without saying where it comes from is how the two drift and a user gets a
+ * server error after filling in a form.
  */
-export const buildObjectKey = (input: {
-  userId: string;
-  parentId: string;
-  documentId: string;
-  page: DocumentPage;
-}): string => {
-  const extension = input.page.kind === 'pdf' ? 'pdf' : 'jpg';
-  return `users/${input.userId}/parents/${input.parentId}/documents/${input.documentId}/${input.page.id}.${extension}`;
-};
+export const MAX_PAGES = 10;
 
-const mockPresign = (input: {
-  userId: string;
-  parentId: string;
-  documentId: string;
+const contentTypeFor = (page: DocumentPage): 'application/pdf' | 'image/jpeg' =>
+  page.kind === 'pdf' ? 'application/pdf' : 'image/jpeg';
+
+export interface UploadInput {
+  accountId: string;
+  patientId: string;
+  /** The document id this device generated while the pages were being taken. */
+  localDocumentId: string;
+  title: string;
+  category: string;
+  documentDate: string;
   pages: DocumentPage[];
-}): PresignedTarget[] =>
-  input.pages.map((page) => {
-    const objectKey = buildObjectKey({ ...input, page });
-    return {
-      pageId: page.id,
-      objectKey,
-      uploadUrl: `https://${config.aws.documentsBucket}.s3.${config.aws.region}.amazonaws.com/${objectKey}?X-Amz-Mock-Signature=demo`,
-      headers: {
-        'Content-Type': page.kind === 'pdf' ? 'application/pdf' : 'image/jpeg',
-        // Mirrors the bucket policy that will reject unencrypted writes.
-        'x-amz-server-side-encryption': 'aws:kms',
-      },
-      expiresAt: new Date(Date.now() + config.upload.presignTtlSeconds * 1000).toISOString(),
-    };
-  });
+  onProgress?: ProgressListener | undefined;
+  signal?: AbortSignal | undefined;
+}
 
-/** Simulates a per-page transfer, reporting progress at a believable cadence. */
-const mockUpload = async (
-  targets: PresignedTarget[],
+const reportProgress = (
   onProgress: ProgressListener | undefined,
-  signal: AbortSignal | undefined,
-): Promise<void> => {
-  const total = targets.length;
-  const stepsPerPage = 4;
-
-  for (let index = 0; index < total; index += 1) {
-    const target = targets[index];
-    if (!target) continue;
-
-    for (let step = 1; step <= stepsPerPage; step += 1) {
-      if (signal?.aborted) throw new ApiError('unknown', 'Upload cancelled.');
-      await sleep(140);
-      const completedFraction = (index + step / stepsPerPage) / total;
-      onProgress?.({
-        percent: Math.round(completedFraction * 100),
-        pagesCompleted: index,
-        pagesTotal: total,
-        currentPageId: target.pageId,
-      });
-    }
-  }
-
-  onProgress?.({ percent: 100, pagesCompleted: total, pagesTotal: total, currentPageId: null });
+  session: UploadSession,
+  currentPage: number | null,
+): void => {
+  onProgress?.({
+    percent: Math.round((session.uploadedPages.length / session.pageCount) * 100),
+    pagesCompleted: session.uploadedPages.length,
+    pagesTotal: session.pageCount,
+    currentPage,
+  });
 };
 
 export const uploadService = {
-  /** Step 1 — ask the backend to sign one PUT per page. */
-  async requestPresignedTargets(input: {
-    userId: string;
-    parentId: string;
-    documentId: string;
-    pages: DocumentPage[];
-  }): Promise<PresignedTarget[]> {
-    if (isBackendEnabled()) {
-      return apiClient.post<PresignedTarget[]>(
-        // `parentId` is the patient id: the record the document belongs to.
-        // It is in the path now rather than the body, so the backend checks the
-        // grant before it signs anything. See ADR-005.
-        endpoints.documents.presignUpload(input.parentId, input.documentId),
-        {
-          pages: input.pages.map((page) => ({
-            pageId: page.id,
-            contentType: page.kind === 'pdf' ? 'application/pdf' : 'image/jpeg',
-            sizeBytes: page.sizeBytes,
-          })),
-        },
-      );
-    }
-    return mockPresign(input);
-  },
-
   /**
-   * Steps 1–3 in one call. Screens use this; it is the only entry point they
-   * need, and its signature will not change when the backend lands.
+   * Uploads a document, or finishes one that was interrupted.
+   *
+   * Idempotent by construction rather than by a retry wrapper: every step
+   * checks what the session already knows before doing anything.
    */
-  async uploadDocument(input: {
-    userId: string;
-    parentId: string;
-    documentId: string;
-    pages: DocumentPage[];
-    onProgress?: ProgressListener;
-    signal?: AbortSignal;
-  }): Promise<UploadResult> {
-    const { documentId, pages, onProgress, signal } = input;
+  async uploadDocument(input: UploadInput): Promise<UploadResult> {
+    const { accountId, patientId, localDocumentId, pages, onProgress, signal } = input;
 
-    if (pages.length === 0) {
-      throw new ApiError('unknown', 'There are no pages to upload.');
+    if (pages.length === 0) throw new ApiError('unknown', 'There are no pages to upload.');
+    if (pages.length > MAX_PAGES) {
+      throw new ApiError('too_large', `A document can have at most ${MAX_PAGES} pages.`);
     }
 
     const oversized = pages.find((page) => page.sizeBytes > config.upload.maxUploadBytes);
     if (oversized) {
-      throw new ApiError('too_large', `"${oversized.fileName}" is larger than the upload limit.`);
+      // The filename is the user's own and they are looking at it; it does not
+      // go anywhere but this screen.
+      throw new ApiError('too_large', `“${oversized.fileName}” is larger than the upload limit.`);
     }
 
-    onProgress?.({ percent: 0, pagesCompleted: 0, pagesTotal: pages.length, currentPageId: null });
-
-    const targets = await uploadService.requestPresignedTargets(input);
-
-    if (isBackendEnabled()) {
-      // TODO(backend): PUT each page to `target.uploadUrl` with `target.headers`
-      // via expo-file-system's uploadAsync, reporting real byte progress.
-      throw new ApiError('unknown', 'Real S3 upload is not implemented yet.');
+    if (!isBackendEnabled()) {
+      throw new ApiError(
+        'unknown',
+        'This build has no server configured, so documents cannot be uploaded.',
+      );
     }
 
-    await mockUpload(targets, onProgress, signal);
+    const sessions = createUploadSessions(accountId);
+    let session = await sessions.start({
+      localDocumentId,
+      patientId,
+      pageCount: pages.length,
+    });
+
+    // --- 1. The record ------------------------------------------------------
+    if (session.serverDocumentId === null) {
+      const created = await apiClient.post<{ document: { documentId: string } }>(
+        endpoints.documents.create(patientId),
+        {
+          title: input.title,
+          category: input.category,
+          documentDate: input.documentDate,
+          pageCount: pages.length,
+        },
+      );
+      await sessions.attachServerId(localDocumentId, created.document.documentId);
+      session = (await sessions.get(localDocumentId)) as UploadSession;
+    }
+
+    const serverDocumentId = session.serverDocumentId as string;
+    reportProgress(onProgress, session, null);
+
+    // --- 2 & 3. The pages that are still missing ----------------------------
+    const outstanding = pages
+      .map((page, index) => ({ page, number: index + 1 }))
+      .filter(({ number }) => !session.uploadedPages.includes(number));
+
+    if (outstanding.length > 0) {
+      /**
+       * URLs are requested for the outstanding pages only, and requested *now*
+       * rather than reused from a previous attempt.
+       *
+       * A presigned URL is valid for minutes. One saved with the session and
+       * replayed tomorrow is expired, and the PUT fails with a signature error
+       * that looks nothing like "ask again" — so they are never persisted.
+       */
+      const { uploads } = await apiClient.post<{ uploads: PresignedTarget[] }>(
+        endpoints.documents.presignUpload(patientId, serverDocumentId),
+        {
+          pages: outstanding.map(({ page, number }) => ({
+            page: number,
+            contentType: contentTypeFor(page),
+          })),
+        },
+      );
+
+      for (const { page, number } of outstanding) {
+        if (signal?.aborted) throw new ApiError('unknown', 'Upload cancelled.');
+
+        const target = uploads.find((upload) => upload.page === number);
+        if (target === undefined) {
+          throw new ApiError('unknown', 'The server did not offer a place for every page.');
+        }
+
+        const file = new File(page.uri);
+        if (!file.exists) {
+          throw new ApiError(
+            'not_found',
+            'One of the pages is no longer on this phone. Take it again.',
+          );
+        }
+
+        const response = await file.upload(target.url, {
+          httpMethod: 'PUT',
+          headers: target.headers,
+          mimeType: contentTypeFor(page),
+        });
+
+        if (response.status < 200 || response.status >= 300) {
+          // Left un-marked, so a retry sends this page again. The alternative —
+          // assuming success — completes a document with a missing page and
+          // produces a summary that silently omits whatever was on it.
+          throw new ApiError('unknown', 'A page did not finish uploading. Try again.');
+        }
+
+        await sessions.markPageUploaded(localDocumentId, number);
+        session = (await sessions.get(localDocumentId)) as UploadSession;
+        reportProgress(onProgress, session, number);
+      }
+    }
+
+    // --- 4. Tell the server, which verifies and enqueues --------------------
+    /**
+     * The completion call is where the server checks every page actually
+     * arrived. It is safe to repeat: a second call is answered with
+     * `alreadyQueued` rather than queuing the document twice.
+     */
+    const completed = await apiClient.post<{ alreadyQueued: boolean }>(
+      endpoints.documents.completeUpload(patientId, serverDocumentId),
+    );
+
+    await sessions.markComplete(localDocumentId);
 
     return {
-      documentId,
-      objectKeys: targets.map((target) => target.objectKey),
-      processingJobId: `job_${documentId}`,
+      serverDocumentId,
+      pagesUploaded: pages.length,
+      queued: !completed.alreadyQueued,
     };
   },
 
-  /** Step 3 — tells the backend every page landed, which enqueues the SQS job. */
-  async completeUpload(
-    parentId: string,
-    documentId: string,
-    objectKeys: string[],
-  ): Promise<{ jobId: string }> {
-    if (isBackendEnabled()) {
-      return apiClient.post<{ jobId: string }>(
-        endpoints.documents.completeUpload(parentId, documentId),
-        { objectKeys },
-      );
-    }
-    return { jobId: `job_${documentId}` };
+  /**
+   * Uploads that were interrupted and can be picked up again.
+   *
+   * Read on launch. Anything here has bytes on disk and a record that thinks it
+   * is still uploading, and the user should be told rather than left to notice
+   * a document that never appeared.
+   */
+  async resumable(accountId: string): Promise<UploadSession[]> {
+    return createUploadSessions(accountId).unfinished();
+  },
+
+  /** Forgets an upload the user abandoned. Bytes are removed separately. */
+  async abandon(accountId: string, localDocumentId: string): Promise<void> {
+    await createUploadSessions(accountId).discard(localDocumentId);
   },
 };
