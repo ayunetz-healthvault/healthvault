@@ -27,6 +27,20 @@ jest.mock('@/config/env', () => ({
   isDemoBuild: () => false,
 }));
 
+/**
+ * The outbox this device is holding, as the pull sees it.
+ *
+ * Set per test. `null` is "nobody is signed in", which is the default here and
+ * genuinely means nothing can be waiting; a queue that throws is the case that
+ * must not be read as "nothing is waiting".
+ */
+let mockOutbox: (() => Promise<unknown[]>) | null = null;
+
+jest.mock('./pushService', () => ({
+  ...jest.requireActual('./pushService'),
+  currentSyncService: () => (mockOutbox === null ? null : { outbox: { all: mockOutbox } }),
+}));
+
 const fetchMock = jest.fn();
 
 const patient = {
@@ -164,6 +178,7 @@ const serve = (options: { reachable: boolean; followUps?: unknown[] }): void => 
 const snapshot = (): VaultSnapshot => vaultSnapshot();
 
 beforeEach(() => {
+  mockOutbox = null;
   fetchMock.mockReset();
   globalThis.fetch = fetchMock as unknown as typeof fetch;
   setTokenProvider(async () => 'token');
@@ -306,5 +321,88 @@ describe('follow-ups arriving from another family member', () => {
     await pullIntoVault();
 
     expect(snapshot().followUps).toEqual([]);
+  });
+});
+
+/**
+ * Deleting a task, and the pull that used to undo it.
+ *
+ * The screen removes the follow-up locally and then queues the DELETE, so
+ * between the tap and the request reaching the server there is no local row at
+ * all. The pull saw the server's copy, decided this device had never seen it,
+ * and added it back — the person deleted an appointment, watched it disappear,
+ * and found it on their screen again after the next refresh.
+ */
+describe('a follow-up deleted while the phone is offline', () => {
+  const stillQueued = [
+    { entity: 'follow_up', entityId: 'fup_clinic', operation: 'delete' },
+  ];
+
+  it('does not reappear on a pull while its deletion is queued', async () => {
+    serve({ reachable: true });
+    mockOutbox = async () => [];
+    await pullIntoVault();
+    expect(snapshot().followUps).toHaveLength(1);
+
+    // Deleted here; the request has not reached the server, so the server still
+    // returns it.
+    useVaultStore.getState().removeFollowUp('fup_clinic');
+    mockOutbox = async () => stillQueued;
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toEqual([]);
+  });
+
+  it('stays gone across a failed send and another pull', async () => {
+    serve({ reachable: true });
+    mockOutbox = async () => [];
+    await pullIntoVault();
+
+    useVaultStore.getState().removeFollowUp('fup_clinic');
+    mockOutbox = async () => stillQueued;
+    await pullIntoVault();
+    // The send failed and the change is still queued; refreshing again must not
+    // be the thing that brings it back.
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toEqual([]);
+  });
+
+  it('is finally settled by the server once the delete lands', async () => {
+    serve({ reachable: true });
+    mockOutbox = async () => [];
+    await pullIntoVault();
+
+    useVaultStore.getState().removeFollowUp('fup_clinic');
+    mockOutbox = async () => stillQueued;
+    await pullIntoVault();
+
+    // The DELETE reaches the server and leaves the queue.
+    serve({ reachable: true, followUps: [] });
+    mockOutbox = async () => [];
+    await pullIntoVault();
+
+    expect(snapshot().followUps).toEqual([]);
+  });
+
+  /**
+   * And an outbox that cannot be read is not an empty one. Reading a queue
+   * error as "no local changes" is exactly how the deletion above comes back.
+   */
+  it('changes nothing when the queue cannot be read', async () => {
+    serve({ reachable: true });
+    mockOutbox = async () => [];
+    await pullIntoVault();
+
+    useVaultStore.getState().removeFollowUp('fup_clinic');
+    mockOutbox = async () => {
+      throw new Error('the outbox could not be decrypted');
+    };
+    const outcome = await pullIntoVault();
+
+    // The rest of the pull still applies; only the tasks are left alone.
+    expect(outcome.outcome).toBe('applied');
+    expect(snapshot().followUps).toEqual([]);
+    expect(snapshot().documents).toHaveLength(3);
   });
 });

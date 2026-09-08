@@ -1,3 +1,5 @@
+import type { MutationOperation } from './types';
+
 import type { FollowUp } from '@/types/domain';
 
 /**
@@ -20,10 +22,33 @@ import type { FollowUp } from '@/types/domain';
  * - **A task the server no longer has is gone.** Somebody deleted it, and
  *   keeping it here would resurrect it on this phone alone.
  *
- * The third rule is the one that needs care, and `pendingIds` is what makes it
- * safe: a task created on this device and not yet accepted is absent from the
- * server for a completely different reason.
+ * The third rule is the one that needs care, and the pending changes are what
+ * make it safe: a task created on this device and not yet accepted is absent
+ * from the server for a completely different reason.
+ *
+ * ## Why the pending *operation* matters, not just the id
+ *
+ * A pending delete has no local row to protect — the screen removes it before
+ * queueing the request, which is what makes deleting feel immediate. So the
+ * first two rules never see it, and the last loop, which adds everything the
+ * server returned that this device does not have, put the appointment straight
+ * back. The person deleted it, watched it disappear, and found it waiting for
+ * them after the next refresh.
+ *
+ * ## Why an unreadable queue stops the merge
+ *
+ * `pending` can be `unknown`, and that is not the same as empty. If the outbox
+ * cannot be read, this device cannot tell a task the server deleted from one it
+ * is about to delete itself — so it changes nothing rather than guessing, and
+ * the next pull settles it. Treating a failed read as "no pending changes" is
+ * how a queue error turns into somebody's deletion being undone.
  */
+
+/** A change this device is holding: which task, and what it will do to it. */
+export interface PendingChange {
+  readonly entityId: string;
+  readonly operation: MutationOperation;
+}
 
 export interface MergeFollowUpsInput {
   /** Every follow-up currently on this device, across all patients. */
@@ -33,22 +58,37 @@ export interface MergeFollowUpsInput {
   /** Patients this account can no longer reach. Their tasks go with them. */
   readonly removedPatientIds: readonly string[];
   /**
-   * Follow-ups with a change still waiting in the outbox.
+   * Changes still waiting in the outbox, or `unknown` when the queue could not
+   * be read.
    *
    * Passed in rather than read from the queue, so this stays a function about
    * merging and can be argued with in a test that has no storage.
    */
-  readonly pendingIds: readonly string[];
+  readonly pending: readonly PendingChange[] | 'unknown';
 }
 
 export const mergeFollowUps = ({
   local,
   remoteByPatient,
   removedPatientIds,
-  pendingIds,
+  pending,
 }: MergeFollowUpsInput): FollowUp[] => {
   const removed = new Set(removedPatientIds);
-  const pending = new Set(pendingIds);
+
+  /**
+   * Nothing is known about what this device is holding, so nothing is applied.
+   *
+   * Except a record going away: revocation and deletion are the server's to
+   * decide and no local change can be waiting to contradict them.
+   */
+  if (pending === 'unknown') {
+    return local.filter((followUp) => !removed.has(followUp.parentId));
+  }
+
+  const held = new Set(pending.map((change) => change.entityId));
+  const deleting = new Set(
+    pending.filter((change) => change.operation === 'delete').map((change) => change.entityId),
+  );
   const pulledPatientIds = new Set(Object.keys(remoteByPatient));
 
   const remoteById = new Map<string, FollowUp>();
@@ -76,7 +116,7 @@ export const mergeFollowUps = ({
        * has never left this phone; a pending change is what tells the two
        * apart, and it is the only reason to keep one.
        */
-      if (pulledPatientIds.has(followUp.parentId) && !pending.has(followUp.id)) continue;
+      if (pulledPatientIds.has(followUp.parentId) && !held.has(followUp.id)) continue;
 
       kept.push(followUp);
       continue;
@@ -92,13 +132,22 @@ export const mergeFollowUps = ({
      * neither side would recognise; the outbox will send what is here, and the
      * next pull settles it.
      */
-    kept.push(pending.has(followUp.id) ? followUp : takeRemote(followUp, remote));
+    kept.push(held.has(followUp.id) ? followUp : takeRemote(followUp, remote));
   }
 
   for (const patientId of pulledPatientIds) {
     if (removed.has(patientId)) continue;
     for (const followUp of remoteByPatient[patientId] ?? []) {
-      if (!matched.has(followUp.id)) kept.push(followUp);
+      if (matched.has(followUp.id)) continue;
+      /**
+       * A task this device has deleted and not yet managed to say so.
+       *
+       * There is no local row to have matched — the screen removed it when the
+       * person tapped delete — so without this the server's copy is added back
+       * as though it were news, and the appointment they deleted returns.
+       */
+      if (deleting.has(followUp.id)) continue;
+      kept.push(followUp);
     }
   }
 
@@ -108,12 +157,17 @@ export const mergeFollowUps = ({
 /**
  * The server's version, with the one field it cannot be right about.
  *
- * `calendarEventId` names an event in *a* phone's calendar, and this phone can
- * only delete an event in its own. So a local link is never replaced by a
- * remote one: another device's id here would put a "remove from your calendar"
- * button on a screen where there is nothing to remove.
+ * `calendarEventId` names an event in *a* phone's calendar, and no other phone
+ * can do anything with it: passing another device's id to this device's
+ * calendar API deletes nothing, or worse, something else. So the local value
+ * stands, including when the local value is "there is no event here" — falling
+ * back to the remote id, which is what this used to do, put a "remove from your
+ * calendar" button on a phone with nothing to remove.
+ *
+ * Which event belongs to which task on *this* device is `calendarMappings`,
+ * stored on the device that made it.
  */
 const takeRemote = (local: FollowUp, remote: FollowUp): FollowUp => ({
   ...remote,
-  calendarEventId: local.calendarEventId ?? remote.calendarEventId,
+  calendarEventId: local.calendarEventId,
 });

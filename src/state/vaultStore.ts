@@ -8,7 +8,7 @@ import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
 import { activeVaultStorage } from '@/services/storage/activeVault';
 import { mergeDocuments } from '@/services/sync/mergeDocuments';
-import { mergeFollowUps } from '@/services/sync/mergeFollowUps';
+import { mergeFollowUps, type PendingChange } from '@/services/sync/mergeFollowUps';
 import type {
   DocumentSummary,
   SummaryCorrection,
@@ -107,13 +107,15 @@ export interface AppliedPull {
   /** The shared task list, keyed by patient. */
   readonly followUpsByPatient: Record<string, FollowUp[]>;
   /**
-   * Follow-ups with a change still queued on this device.
+   * Follow-up changes still queued on this device, or `unknown` when the outbox
+   * could not be read.
    *
    * The pull must not overwrite those: the outbox is holding the only copy of
    * what somebody just did, and the server's row is the state before they did
-   * it. See `mergeFollowUps`.
+   * it. A pending *delete* has no local row at all, which is why the operation
+   * travels with the id — see `mergeFollowUps`.
    */
-  readonly pendingFollowUpIds: readonly string[];
+  readonly pendingFollowUps: readonly PendingChange[] | 'unknown';
   readonly removedPatientIds: string[];
 }
 
@@ -248,7 +250,6 @@ interface VaultState {
   addFollowUp: (draft: FollowUpDraft) => FollowUp;
   updateFollowUp: (id: string, patch: Partial<FollowUp>) => void;
   setFollowUpStatus: (id: string, status: FollowUpStatus) => void;
-  attachCalendarEvent: (id: string, eventId: string | null) => void;
   removeFollowUp: (id: string) => void;
 }
 
@@ -410,7 +411,7 @@ export const useVaultStore = create<VaultState>()(
         documentsByPatient,
         summaries,
         followUpsByPatient,
-        pendingFollowUpIds,
+        pendingFollowUps,
         removedPatientIds,
       }) =>
         set((state) => {
@@ -466,7 +467,7 @@ export const useVaultStore = create<VaultState>()(
               local: state.followUps,
               remoteByPatient: followUpsByPatient,
               removedPatientIds,
-              pendingIds: pendingFollowUpIds,
+              pending: pendingFollowUps,
             }),
           };
         }),
@@ -664,8 +665,6 @@ export const useVaultStore = create<VaultState>()(
         })),
 
       setFollowUpStatus: (id, status) => get().updateFollowUp(id, { status }),
-
-      attachCalendarEvent: (id, eventId) => get().updateFollowUp(id, { calendarEventId: eventId }),
 
       removeFollowUp: (id) =>
         set((state) => ({ followUps: state.followUps.filter((followUp) => followUp.id !== id) })),

@@ -1,3 +1,4 @@
+import type { PendingChange } from './mergeFollowUps';
 import { currentSyncService } from './pushService';
 import { pullRecords, toParentProfile } from './reconcile';
 
@@ -22,17 +23,28 @@ export type PullOutcome =
   /** Offline, or the server said no. The cached records are untouched. */
   | { readonly outcome: 'failed'; readonly error: unknown };
 
-/** The follow-ups this device has changes queued for, or none if it cannot say. */
-const pendingFollowUps = async (): Promise<string[]> => {
+/**
+ * The follow-up changes this device is still holding.
+ *
+ * Returns `'unknown'` rather than an empty list when the queue cannot be read,
+ * and the difference is the whole point: empty means "nothing is waiting", and
+ * a merge acts on it. An unreadable outbox means this device cannot tell a task
+ * the server deleted from one it is about to delete itself, and guessing
+ * "nothing pending" there undoes somebody's deletion on the next refresh.
+ *
+ * With no signed-in account there is no queue to read and nothing can be
+ * waiting in it, which is genuinely empty rather than unknown.
+ */
+const pendingFollowUps = async (): Promise<PendingChange[] | 'unknown'> => {
   const service = currentSyncService();
   if (service === null) return [];
 
   try {
     return (await service.outbox.all())
       .filter((mutation) => mutation.entity === 'follow_up')
-      .map((mutation) => mutation.entityId);
+      .map((mutation) => ({ entityId: mutation.entityId, operation: mutation.operation }));
   } catch {
-    return [];
+    return 'unknown';
   }
 };
 
@@ -62,11 +74,12 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
      * A follow-up with a queued change must survive the pull unchanged — the
      * queue has the only copy of what somebody just did, and applying the
      * server's row over it would silently undo a completed appointment while
-     * its request was still waiting to be sent. An unreadable queue yields an
-     * empty list, which means the pull is authoritative: that is the wrong way
-     * round for exactly one refresh, and the alternative is refusing to sync.
+     * its request was still waiting to be sent. A pending *delete* matters just
+     * as much and has no local row to protect it, which is why the operation
+     * travels with the id. An unreadable queue says so rather than reporting
+     * nothing pending — see `mergeFollowUps`.
      */
-    const pendingFollowUpIds = await pendingFollowUps();
+    const pending = await pendingFollowUps();
 
     const existingById = new Map(before.parents.map((parent) => [parent.id, parent]));
     const parents: ParentProfile[] = pulled.patients.map(({ patient }) =>
@@ -78,7 +91,7 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
       documentsByPatient: pulled.documentsByPatient,
       summaries: pulled.summariesByDocumentId,
       followUpsByPatient: pulled.followUpsByPatient,
-      pendingFollowUpIds,
+      pendingFollowUps: pending,
       removedPatientIds: pulled.removedPatientIds,
     });
 
