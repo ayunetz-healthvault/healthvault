@@ -92,7 +92,23 @@ export interface AuditEntry {
 export interface PatientRecordRepository {
   putPatient(patient: PatientRecord): Promise<void>;
   getPatient(patientId: PatientId): Promise<PatientRecord | null>;
+  /**
+   * Removes the profile row only.
+   *
+   * Deliberately narrow, and almost never what a caller wants: a record is a
+   * partition full of documents, summaries, consent and audit, and deleting
+   * the profile alone leaves all of it behind under a patient nobody can name.
+   * `deleteEverythingFor` is the erasure path.
+   */
   deletePatient(patientId: PatientId): Promise<void>;
+  /**
+   * Deletes every item in this record's partition.
+   *
+   * Returns what it removed, by kind, so the caller can report an erasure
+   * rather than assert one. Objects in the store are *not* touched here — they
+   * are the caller's to delete, because this port knows nothing about them.
+   */
+  deleteEverythingFor(patientId: PatientId): Promise<{ items: number }>;
 
   putDocument(patientId: PatientId, document: DocumentRecord): Promise<void>;
   getDocument(patientId: PatientId, documentId: string): Promise<DocumentRecord | null>;
@@ -203,6 +219,33 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
       await client.send(
         new DeleteCommand({ TableName, Key: { PK: patientPk(patientId), SK: PATIENT_PROFILE_SK } }),
       );
+    },
+
+    /**
+     * Every row under this patient, deleted one at a time.
+     *
+     * Not a batch: `BatchWriteItem` caps at 25 and partially succeeds, which
+     * for an erasure means reporting a deletion that half happened. Slower and
+     * answerable beats faster and unprovable.
+     */
+    async deleteEverythingFor(patientId) {
+      const response = await client.send(
+        new QueryCommand({
+          TableName,
+          KeyConditionExpression: 'PK = :pk',
+          ExpressionAttributeValues: { ':pk': patientPk(patientId) },
+          ProjectionExpression: 'PK, SK',
+        }),
+      );
+
+      const items = response.Items ?? [];
+      for (const item of items) {
+        await client.send(
+          new DeleteCommand({ TableName, Key: { PK: item.PK as string, SK: item.SK as string } }),
+        );
+      }
+
+      return { items: items.length };
     },
 
     async putDocument(patientId, document) {

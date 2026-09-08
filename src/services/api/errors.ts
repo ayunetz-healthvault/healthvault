@@ -16,17 +16,33 @@ export class ApiError extends Error {
   readonly status: number | null;
   /** API Gateway request id, echoed back for support tickets. */
   readonly requestId: string | null;
+  /**
+   * Structured detail the server sent with a refusal.
+   *
+   * Some refusals are only actionable with it: "these records would be left
+   * with nobody" is a different message from a list of which ones, and a screen
+   * that has to say "something went wrong" instead is telling the user less
+   * than the server told the app. Never rendered raw — a caller reads the field
+   * it expects and ignores the rest.
+   */
+  readonly details: Record<string, unknown> | null;
 
   constructor(
     kind: ApiErrorKind,
     message: string,
-    options: { status?: number | null; requestId?: string | null; cause?: unknown } = {},
+    options: {
+      status?: number | null;
+      requestId?: string | null;
+      details?: Record<string, unknown> | null;
+      cause?: unknown;
+    } = {},
   ) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = 'ApiError';
     this.kind = kind;
     this.status = options.status ?? null;
     this.requestId = options.requestId ?? null;
+    this.details = options.details ?? null;
   }
 
   /** Copy that is safe to show a non-technical caregiver. */

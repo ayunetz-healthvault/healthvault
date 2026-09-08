@@ -23,6 +23,10 @@ export const endpoints = {
     list: () => '/v1/patients',
     create: () => '/v1/patients',
     get: (patientId: string) => `/v1/patients/${patientId}`,
+    /** Erasure. `self` only, and it takes the record's name to confirm. */
+    remove: (patientId: string) => `/v1/patients/${patientId}`,
+    /** Everything this record holds, as it stands right now. */
+    export: (patientId: string) => `/v1/patients/${patientId}/export`,
   },
 
   access: {

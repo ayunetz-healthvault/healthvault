@@ -200,6 +200,34 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
       patients.delete(patientId);
     },
 
+    async deleteEverythingFor(patientId) {
+      const prefix = `${patientId}::`;
+      let items = 0;
+
+      for (const store of [documents, processing, summaries, followUps]) {
+        for (const entryKey of [...store.keys()]) {
+          if (entryKey.startsWith(prefix)) {
+            store.delete(entryKey);
+            items += 1;
+          }
+        }
+      }
+
+      if (patients.delete(patientId)) items += 1;
+
+      const keptConsent = consent.filter((record) => record.patientId !== patientId);
+      items += consent.length - keptConsent.length;
+      consent.length = 0;
+      consent.push(...keptConsent);
+
+      const keptAudit = audit.filter((entry) => entry.patientId !== patientId);
+      items += audit.length - keptAudit.length;
+      audit.length = 0;
+      audit.push(...keptAudit);
+
+      return { items };
+    },
+
     async putDocument(patientId, document) {
       documents.set(key(patientId, document.documentId), document);
     },

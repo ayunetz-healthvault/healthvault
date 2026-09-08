@@ -98,7 +98,11 @@ const sendOnce = async <T>(
       throw new ApiError(
         kindForStatus(response.status),
         messageFrom(payload, `Request failed with status ${response.status}`),
-        { status: response.status, requestId: response.headers.get('x-amzn-requestid') },
+        {
+          status: response.status,
+          requestId: response.headers.get('x-amzn-requestid'),
+          details: detailsFrom(payload),
+        },
       );
     }
 
@@ -108,6 +112,21 @@ const sendOnce = async <T>(
   } finally {
     clearTimeout(timer);
   }
+};
+
+/**
+ * The `details` object from an error body, when there is one.
+ *
+ * Carried through so a caller can act on a refusal — which records would be
+ * stranded, which summary version is current — rather than being left with a
+ * status code and a sentence.
+ */
+const detailsFrom = (payload: unknown): Record<string, unknown> | null => {
+  if (payload === null || typeof payload !== 'object') return null;
+  const details = (payload as { details?: unknown }).details;
+  return details !== null && typeof details === 'object'
+    ? (details as Record<string, unknown>)
+    : null;
 };
 
 export const apiRequest = async <T>(path: string, options: RequestOptions = {}): Promise<T> => {
@@ -144,6 +163,16 @@ export const apiClient = {
     apiRequest<T>(path, { ...options, method: 'POST', body }),
   patch: <T>(path: string, body?: unknown, options?: Omit<RequestOptions, 'method' | 'body'>) =>
     apiRequest<T>(path, { ...options, method: 'PATCH', body }),
-  delete: <T>(path: string, options?: Omit<RequestOptions, 'method' | 'body'>) =>
-    apiRequest<T>(path, { ...options, method: 'DELETE' }),
+  /**
+   * `DELETE`, optionally with a body.
+   *
+   * A body on a DELETE is unusual but right here: deleting a record requires
+   * the person to type its name, and a name is exactly the kind of thing that
+   * must not travel in a URL, where it lands in access logs and browser
+   * history. The only alternative — a POST that deletes — hides the verb.
+   */
+  delete: <T>(
+    path: string,
+    options?: Omit<RequestOptions, 'method'> & { body?: unknown },
+  ) => apiRequest<T>(path, { ...options, method: 'DELETE' }),
 };

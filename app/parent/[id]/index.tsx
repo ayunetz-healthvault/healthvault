@@ -163,6 +163,13 @@ export default function ParentProfileScreen(): React.JSX.Element {
 
       <Card style={styles.detailsCard}>
         <ListRow
+          icon="download-outline"
+          title="Export this record"
+          subtitle="Everything held for this person, as it stands now."
+          onPress={() => router.push(`/parent/${parent.id}/export`)}
+          testID="parent-export-link"
+        />
+        <ListRow
           icon="create-outline"
           title="Notes and symptoms"
           subtitle="Anything you have noticed, in your own words, ready for the next visit."

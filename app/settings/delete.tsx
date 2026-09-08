@@ -15,7 +15,7 @@ import {
   Text,
   TextField,
 } from '@/components';
-import { DELETION_GRACE_DAYS, accountService } from '@/services/account/accountService';
+import { accountService } from '@/services/account/accountService';
 import { useSessionStore } from '@/state/sessionStore';
 import { useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { spacing } from '@/theme';
@@ -46,6 +46,8 @@ export default function DeleteDataScreen(): React.JSX.Element {
   const [confirmText, setConfirmText] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Records only this account can reach, which block an account deletion. */
+  const [blocked, setBlocked] = useState<string[]>([]);
 
   const pendingDocument = vault.documents.find((doc) => doc.id === pendingDocumentId);
 
@@ -76,14 +78,32 @@ export default function DeleteDataScreen(): React.JSX.Element {
     // Belt and braces: the button is disabled below, but this guard means a
     // stray call can never erase an account without the typed confirmation.
     if (!confirmMatches) return;
+
     setBusy(true);
-    const request = await accountService.requestAccountDeletion();
+    const result = await accountService.requestAccountDeletion();
+
+    /**
+     * Refused, and nothing has been removed.
+     *
+     * These records would be left with nobody who can reach them — including
+     * nobody who could delete them later. The alternatives are both worse:
+     * stranding them, or deleting somebody's medical history because a
+     * different request was made. So the person is told which records, and
+     * asked to hand them over or delete them first.
+     */
+    if (result.outcome === 'records_would_be_stranded') {
+      setBusy(false);
+      setAccountVisible(false);
+      setBlocked(result.patientIds);
+      return;
+    }
+
     clearAll();
     await accountService.wipeLocalData();
     await signOut();
     setBusy(false);
     setAccountVisible(false);
-    router.replace(`/sign-in?deletionScheduledFor=${request.scheduledFor}`);
+    router.replace('/sign-in?accountDeleted=1');
   };
 
   return (
@@ -157,18 +177,34 @@ export default function DeleteDataScreen(): React.JSX.Element {
         <>
           <Callout
             tone="danger"
-            title="This deletes everything"
-            message={`Closing your account erases every parent profile, document, summary and follow-up. There is a ${DELETION_GRACE_DAYS}-day grace period during which you can still change your mind by signing back in.`}
+            title="This removes your access"
+            /*
+              Says what actually happens, which is not what this screen used to
+              promise. There is no grace period — nothing on the server
+              implements one — and closing an account does not delete records
+              other people still hold. A record shared with a sibling is that
+              person's record too.
+            */
+            message="This removes your access to every record you can reach, and wipes this phone. Records other people can still reach are not deleted — they keep theirs. Anything only you can reach has to be deleted first, and this will tell you which."
           />
 
-          <SectionHeader title="What gets deleted" />
+          {blocked.length === 0 ? null : (
+            <Callout
+              tone="warning"
+              title="Some records would be left with nobody"
+              message={`${pluralise(blocked.length, 'record')} can only be reached by you. Open each one and either delete it, or give somebody else access, then try again. Nothing has been removed.`}
+              testID="delete-account-blocked"
+            />
+          )}
+
+          <SectionHeader title="What happens on this phone" />
           <Card>
             {[
-              `${pluralise(vault.parents.length, 'parent profile')}`,
-              `${pluralise(vault.documents.length, 'document')} and every stored page`,
-              `${pluralise(vault.summaries.length, 'summary')}`,
-              `${pluralise(vault.followUps.length, 'follow-up')}`,
-              'Your sign-in credentials',
+              `${pluralise(vault.parents.length, 'profile')} removed from this device`,
+              `${pluralise(vault.documents.length, 'document')} and their pages removed from this device`,
+              `${pluralise(vault.summaries.length, 'summary')} removed from this device`,
+              `${pluralise(vault.followUps.length, 'follow-up')} removed from this device`,
+              'Your sign-in is deleted separately, by the service that holds it',
             ].map((line) => (
               <View key={line} style={styles.bulletRow}>
                 <Text variant="callout" tone="secondary">
