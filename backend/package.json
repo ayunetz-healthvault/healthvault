@@ -9,6 +9,8 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "worker": "tsx src/worker.ts",
+    "worker:dev": "tsx watch src/worker.ts",
     "stack:up": "docker compose -f docker-compose.yml up -d --wait && npm run stack:init",
     "stack:down": "docker compose -f docker-compose.yml down",
     "stack:reset": "docker compose -f docker-compose.yml down -v && npm run stack:up",
