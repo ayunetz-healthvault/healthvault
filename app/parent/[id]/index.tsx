@@ -47,7 +47,7 @@ export default function ParentProfileScreen(): React.JSX.Element {
           title="Profile not found"
           message="This profile may have been deleted from another device."
           actionLabel="Back to home"
-          onAction={() => router.replace('/(tabs)')}
+          onAction={() => router.replace('/')}
         />
       </Screen>
     );

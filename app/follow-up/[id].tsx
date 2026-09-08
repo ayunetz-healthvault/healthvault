@@ -64,7 +64,7 @@ export default function FollowUpScreen(): React.JSX.Element {
           title="Follow-up not found"
           message="It may have been deleted."
           actionLabel="Back to follow-ups"
-          onAction={() => router.replace('/(tabs)/schedule')}
+          onAction={() => router.replace('/schedule')}
         />
       </Screen>
     );
@@ -131,7 +131,7 @@ export default function FollowUpScreen(): React.JSX.Element {
     setDeleteVisible(false);
     if (followUp.calendarEventId) void calendarService.removeEvent(followUp.calendarEventId);
     removeFollowUp(followUp.id);
-    router.replace('/(tabs)/schedule');
+    router.replace('/schedule');
   };
 
   const setStatus = (status: FollowUpStatus): void => setFollowUpStatus(followUp.id, status);

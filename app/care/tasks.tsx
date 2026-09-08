@@ -52,8 +52,14 @@ const EMPTY_COPY: Record<Filter, { title: string; message: string }> = {
   },
 };
 
-/** All follow-ups across every parent, filtered by status. */
-export default function ScheduleScreen(): React.JSX.Element {
+/**
+ * The family to-do: every next step across every record the caregiver can see.
+ *
+ * Was the "Follow-ups" tab in the previous shell, kept whole. The rename is the
+ * reference's, and it is the better word — these are things somebody agreed to
+ * do, not appointments the app arranged.
+ */
+export default function CaregiverTasksScreen(): React.JSX.Element {
   const router = useRouter();
   const [filter, setFilter] = useState<Filter>('upcoming');
 
@@ -66,7 +72,7 @@ export default function ScheduleScreen(): React.JSX.Element {
       testID="schedule"
       footer={
         <Button
-          label="Add a follow-up"
+          label="Add a next step"
           icon="add"
           onPress={() => router.push('/follow-up/new')}
           testID="schedule-add"
@@ -75,7 +81,7 @@ export default function ScheduleScreen(): React.JSX.Element {
     >
       <View style={styles.header}>
         <Text variant="title" accessibilityRole="header">
-          Follow-ups
+          Family to-do
         </Text>
         <Text variant="caption" tone="secondary">
           Appointments, tests and refills across everyone you look after.

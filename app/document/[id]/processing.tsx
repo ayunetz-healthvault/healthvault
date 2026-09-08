@@ -133,7 +133,7 @@ export default function ProcessingScreen(): React.JSX.Element {
           title="Document not found"
           message="It may have been deleted."
           actionLabel="Back to home"
-          onAction={() => router.replace('/(tabs)')}
+          onAction={() => router.replace('/')}
         />
       </Screen>
     );

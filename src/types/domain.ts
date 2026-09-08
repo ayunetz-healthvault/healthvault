@@ -94,6 +94,18 @@ export interface MedicalDocument {
   summaryId: string | null;
   /** Human-readable reason when `status === 'failed'`. */
   failureReason: string | null;
+  /**
+   * When a person checked the extracted summary against the original.
+   *
+   * Undefined on records written before review existed; null once the summary
+   * is ready and nobody has checked it. Note what this is *not*: a person
+   * confirming that the app read the page correctly is not a clinician
+   * validating the content, and no screen may describe it as one. The full
+   * correction and version history lands with KOO-08.
+   */
+  reviewedAt?: IsoDateTime | null;
+  /** Account id of whoever reviewed it, so the record says who. */
+  reviewedBy?: string | null;
   readonly createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }

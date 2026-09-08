@@ -1,0 +1,150 @@
+import { render, screen } from '@testing-library/react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+
+import ParentTodayScreen from '../../../app/me/index';
+
+import { useSessionStore } from '@/state/sessionStore';
+import { useVaultStore } from '@/state/vaultStore';
+import type { FollowUp, ParentProfile } from '@/types/domain';
+
+/**
+ * The parent's Today screen.
+ *
+ * The single most important assertion in this file is the one that says no
+ * medicine appears. The approved reference fills this card with "Sample
+ * medicine A" so the prototype has something to demonstrate; on a real phone,
+ * belonging to the person whose record it is, that card is an instruction to
+ * take a drug. It must render the no-treatment state instead, and it must say
+ * so in words rather than leaving a blank.
+ */
+
+const METRICS = {
+  frame: { x: 0, y: 0, width: 390, height: 844 },
+  insets: { top: 47, left: 0, right: 0, bottom: 34 },
+};
+
+/** Awaited: React 19 flushes the tree asynchronously. See the care home test. */
+const renderScreen = async (): Promise<void> => {
+  await render(
+    <SafeAreaProvider initialMetrics={METRICS}>
+      <ParentTodayScreen />
+    </SafeAreaProvider>,
+  );
+};
+
+const selfRecord: ParentProfile = {
+  id: 'par_self',
+  fullName: 'Meera Nair',
+  relationship: 'mother',
+  dateOfBirth: '1957-04-02',
+  bloodGroup: 'O+',
+  city: 'Kochi',
+  phone: '',
+  conditions: [],
+  allergies: [],
+  primaryDoctor: '',
+  notes: '',
+  avatarColor: '#145B48',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z',
+};
+
+const visit = (dueDate: string): FollowUp => ({
+  id: 'f1',
+  parentId: selfRecord.id,
+  title: 'Follow-up appointment',
+  kind: 'doctor_visit',
+  dueDate,
+  dueTime: '10:30',
+  notes: '',
+  status: 'scheduled',
+  sourceDocumentId: null,
+  doctorCategory: null,
+  calendarEventId: null,
+  createdAt: '2026-09-01T00:00:00.000Z',
+  updatedAt: '2026-09-01T00:00:00.000Z',
+});
+
+beforeEach(() => {
+  useVaultStore.setState({
+    parents: [selfRecord],
+    documents: [],
+    summaries: [],
+    followUps: [],
+  });
+  useSessionStore.setState({
+    selfRecordId: selfRecord.id,
+    user: {
+      id: 'usr_meera',
+      email: 'meera@example.invalid',
+      fullName: 'Meera Nair',
+      location: 'Kochi, India',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    },
+  });
+});
+
+describe('parent Today', () => {
+  it('shows the no-treatment state instead of inventing a medicine', async () => {
+    await renderScreen();
+
+    expect(screen.getByTestId('me-today-no-treatment')).toBeTruthy();
+    expect(screen.getByText('No medicine schedule set up')).toBeTruthy();
+
+    // The reference's placeholder, and anything shaped like it.
+    for (const forbidden of [/sample medicine/i, /\bmg\b/, /take .* tablet/i, /morning dose/i]) {
+      expect(screen.queryByText(forbidden)).toBeNull();
+    }
+  });
+
+  it('says nothing is being tracked, rather than leaving the absence unexplained', async () => {
+    await renderScreen();
+
+    expect(screen.getByText(/Nothing is being tracked until then/i)).toBeTruthy();
+  });
+
+  it('offers the appointment or capture action when there is no schedule', async () => {
+    await renderScreen();
+
+    expect(screen.getByTestId('me-today-no-visit')).toBeTruthy();
+    expect(screen.getByTestId('me-today-add-document-alt')).toBeTruthy();
+  });
+
+  it('shows the real next visit when one exists, with the timezone named', async () => {
+    useVaultStore.setState({ followUps: [visit('2099-01-01')] });
+    await renderScreen();
+
+    expect(screen.getByTestId('me-today-visit')).toBeTruthy();
+    expect(screen.getByText(/IST/)).toBeTruthy();
+    expect(screen.queryByTestId('me-today-no-visit')).toBeNull();
+  });
+
+  it('says a past appointment date has passed rather than presenting it as next', async () => {
+    useVaultStore.setState({ followUps: [visit('2020-01-01')] });
+    await renderScreen();
+
+    expect(screen.getByText(/this date has passed/i)).toBeTruthy();
+  });
+
+  it('names the signed-in person, in their own space', async () => {
+    await renderScreen();
+
+    expect(screen.getByText('My personal space')).toBeTruthy();
+    expect(screen.getByText('Hello, Meera.')).toBeTruthy();
+  });
+
+  it('tells the parent nobody can see the record unless they said so', async () => {
+    await renderScreen();
+
+    expect(screen.getByText(/Nobody can see this record unless you have given them access/i))
+      .toBeTruthy();
+  });
+
+  it('renders an explicit state when the account has no record of its own', async () => {
+    useSessionStore.setState({ selfRecordId: null });
+    await renderScreen();
+
+    expect(screen.getByTestId('me-today-empty-state')).toBeTruthy();
+    expect(screen.queryByTestId('me-today-no-treatment')).toBeNull();
+  });
+});

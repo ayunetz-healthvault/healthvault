@@ -9,7 +9,7 @@ import { useSessionStore } from '@/state/sessionStore';
  *   not onboarded          -> /onboarding
  *   onboarded, signed out  -> /(auth)/sign-in
  *   signed in, locked      -> /lock
- *   signed in, unlocked    -> /(tabs)
+ *   signed in, unlocked    -> / (which picks the caregiver or parent shell)
  *
  * Implemented as a redirect effect rather than conditional rendering so deep
  * links (a calendar reminder tapping through to a follow-up) still land on the

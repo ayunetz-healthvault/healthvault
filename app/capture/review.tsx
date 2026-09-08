@@ -100,7 +100,7 @@ export default function ReviewScreen(): React.JSX.Element {
     setDiscardVisible(false);
     capture.reset();
     router.dismissAll();
-    router.replace('/(tabs)');
+    router.replace('/');
   };
 
   if (capture.pages.length === 0) {

@@ -33,6 +33,18 @@ interface SessionState {
   onboardingComplete: boolean;
   user: AuthUser | null;
   session: AuthSession | null;
+  /**
+   * The record this account is the *subject* of, when it has one.
+   *
+   * Null for a helper who has no record of their own. This is what decides
+   * which of the two experiences renders (see `useExperience`), so it is set
+   * from the server's answer about grants — never from a profile field, a
+   * setting or anything the client can assert about itself.
+   *
+   * Until KOO-03 lands there is no grant model to read it from, so it stays
+   * null except where a demonstration build sets it deliberately.
+   */
+  selfRecordId: string | null;
   privacy: PrivacySettings;
   lockState: LockState;
   /** Timestamp the app last went to background, for the auto-lock timer. */
@@ -42,6 +54,14 @@ interface SessionState {
   completeOnboarding: () => void;
   acceptDisclaimer: () => void;
   signIn: (session: AuthSession) => void;
+  /**
+   * Records which record this account is the subject of.
+   *
+   * Called with the server's answer once grants are readable. It changes what
+   * renders, never what may be read: every screen still asks the backend, and
+   * the backend still checks grants.
+   */
+  setSelfRecordId: (recordId: string | null) => void;
   signOut: () => Promise<void>;
   updatePrivacy: (patch: Partial<PrivacySettings>) => void;
   setLockMethod: (method: AppLockMethod) => void;
@@ -58,6 +78,7 @@ const initialState = {
   onboardingComplete: false,
   user: null as AuthUser | null,
   session: null as AuthSession | null,
+  selfRecordId: null as string | null,
   privacy: DEFAULT_PRIVACY,
   lockState: 'unknown' as LockState,
   backgroundedAt: null as number | null,
@@ -84,6 +105,8 @@ export const useSessionStore = create<SessionState>()(
           // A fresh sign-in is an unlock; the lock screen would be redundant.
           lockState: 'unlocked',
         }),
+
+      setSelfRecordId: (recordId) => set({ selfRecordId: recordId }),
 
       signOut: async () => {
         await authService.signOut();
@@ -135,6 +158,9 @@ export const useSessionStore = create<SessionState>()(
         onboardingComplete: state.onboardingComplete,
         user: state.user,
         privacy: state.privacy,
+        // Persisted so a cold start renders the right home screen before the
+        // first network round trip, rather than flashing the wrong one.
+        selfRecordId: state.selfRecordId,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHydrated();

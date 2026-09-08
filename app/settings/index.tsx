@@ -25,6 +25,21 @@ export default function SettingsScreen(): React.JSX.Element {
   const privacy = useSessionStore((state) => state.privacy);
   const signOut = useSessionStore((state) => state.signOut);
 
+  const selfRecordId = useSessionStore((state) => state.selfRecordId);
+  const setSelfRecordId = useSessionStore((state) => state.setSelfRecordId);
+  const parents = useVaultStore((state) => state.parents);
+  const previewRecordName = parents.find((parent) => parent.id === selfRecordId)?.fullName ?? null;
+
+  /**
+   * Demonstration only. Refuses outright outside a demo build, so this cannot
+   * become a live identity switch even if a caller reaches it another way.
+   */
+  const togglePreview = (): void => {
+    if (!isDemoBuild()) return;
+    setSelfRecordId(selfRecordId === null ? (parents[0]?.id ?? null) : null);
+    router.replace('/');
+  };
+
   const parentCount = useVaultStore((state) => state.parents.length);
   const documentCount = useVaultStore((state) => state.documents.length);
   const resetDemoData = useVaultStore((state) => state.resetDemoData);
@@ -114,6 +129,37 @@ export default function SettingsScreen(): React.JSX.Element {
               icon="refresh-outline"
               onPress={() => setResetVisible(true)}
               testID="settings-reset-demo"
+            />
+            {/*
+              The one way to reach the parent's own screens before accounts and
+              access grants exist.
+
+              It is a demonstration control and nothing else. `isDemoBuild()` is
+              compiled into the bundle, is false in every shipped build, and
+              cannot be turned on from inside the app — the same guard that stops
+              fictional records seeding onto a real caregiver's phone.
+
+              What it must never become is a way to change identity in a live
+              build. The two experiences differ in what may be *read*, so a
+              switch between them in production would be an impersonation
+              control, not a display preference. See DESIGN.md → "Main user
+              experience", and `resolveExperience`, which derives this from
+              records rather than accepting it from anywhere.
+            */}
+            <ListRow
+              title={
+                selfRecordId === null
+                  ? 'Preview the parent’s own screens'
+                  : 'Back to the family screens'
+              }
+              subtitle={
+                selfRecordId === null
+                  ? 'Demonstration only — shows the individual parent experience'
+                  : `Currently previewing ${previewRecordName ?? 'a parent'}’s own experience`
+              }
+              icon="phone-portrait-outline"
+              onPress={togglePreview}
+              testID="settings-preview-parent"
             />
           </Card>
         </>
