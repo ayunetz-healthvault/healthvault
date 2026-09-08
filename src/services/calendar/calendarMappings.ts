@@ -1,3 +1,4 @@
+import { currentVaultAccountId } from '@/services/storage/activeVault';
 import { createEncryptedStore } from '@/services/storage/encryptedStore';
 import { nowIso } from '@/utils/date';
 
@@ -40,6 +41,18 @@ export interface CalendarMappings {
   forget(followUpId: string): Promise<void>;
   clear(): Promise<void>;
 }
+
+/**
+ * The mappings for whoever is signed in, or null when nobody is.
+ *
+ * So a screen can ask "does this phone have an event for this task" without
+ * knowing which account's store to look in — the same shape as
+ * `currentSyncService`.
+ */
+export const currentCalendarMappings = (): CalendarMappings | null => {
+  const accountId = currentVaultAccountId();
+  return accountId === null ? null : createCalendarMappings(accountId);
+};
 
 export const createCalendarMappings = (accountId: string): CalendarMappings => {
   const store = createEncryptedStore(accountId);

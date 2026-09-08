@@ -273,7 +273,16 @@ const toFollowUp = (remote: RemoteFollowUp): FollowUp => ({
     : 'scheduled',
   sourceDocumentId: remote.sourceDocumentId ?? null,
   doctorCategory: (remote.doctorCategory ?? null) as FollowUp['doctorCategory'],
-  calendarEventId: remote.calendarEventId ?? null,
+  /**
+   * Always null, whatever the server holds.
+   *
+   * A calendar event id names an event in one phone's calendar. Carrying
+   * another device's id onto this one told the screen there was an event here
+   * to remove, and handed that foreign id to this device's calendar API.
+   * Whether *this* phone has an event for a task is a local question, answered
+   * by `calendarMappings`.
+   */
+  calendarEventId: null,
   createdAt: remote.createdAt,
   updatedAt: remote.updatedAt,
 });

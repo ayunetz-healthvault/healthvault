@@ -44,7 +44,7 @@ export interface CalendarEventPreview {
 }
 
 export type CalendarWriteResult =
-  | { status: 'created'; eventId: string; calendarTitle: string }
+  | { status: 'created'; eventId: string; calendarId: string; calendarTitle: string }
   | { status: 'permission_denied' }
   | { status: 'no_writable_calendar' }
   /** This platform has no calendar to write to — the web preview, chiefly. */
@@ -245,7 +245,15 @@ export const calendarService = {
         }),
       );
 
-      return { status: 'created', eventId, calendarTitle: target?.title ?? 'your calendar' };
+      return {
+        status: 'created',
+        eventId,
+        // Named so the device mapping can record *where* the event went. An
+        // event id alone is not enough to find it again on a phone with more
+        // than one calendar.
+        calendarId: targetId,
+        calendarTitle: target?.title ?? 'your calendar',
+      };
     } catch (error) {
       return {
         status: 'failed',

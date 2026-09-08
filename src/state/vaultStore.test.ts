@@ -255,14 +255,18 @@ describe('follow-ups', () => {
     expect(useVaultStore.getState().followUps[0]?.status).toBe('completed');
   });
 
-  it('attaches and clears a calendar event id', () => {
+  /**
+   * There is no longer a way to put a calendar event id on a shared follow-up,
+   * and that is the point. The id addresses one calendar on one phone, so the
+   * store that holds it is `calendarMappings`, on that phone. What used to be
+   * here made one person's reminder look like everybody's.
+   */
+  it('keeps no calendar event id on the shared record', () => {
     const followUp = addFollowUp('par_1', isoToday(5));
 
-    useVaultStore.getState().attachCalendarEvent(followUp.id, 'event-1');
-    expect(useVaultStore.getState().followUps[0]?.calendarEventId).toBe('event-1');
-
-    useVaultStore.getState().attachCalendarEvent(followUp.id, null);
     expect(useVaultStore.getState().followUps[0]?.calendarEventId).toBeNull();
+    expect('attachCalendarEvent' in useVaultStore.getState()).toBe(false);
+    expect(followUp.calendarEventId).toBeNull();
   });
 
   it('lists only scheduled items as upcoming, soonest first', () => {

@@ -382,7 +382,15 @@ export interface FollowUp {
   /** Document that prompted this follow-up, when there is one. */
   sourceDocumentId: string | null;
   doctorCategory: DoctorCategory | null;
-  /** Set only after the user explicitly confirms the calendar prompt. */
+  /**
+   * Always null on a record this app writes or pulls.
+   *
+   * A calendar event id addresses one calendar on one device, so this app keeps
+   * its own in `calendarMappings`, on the device that made it. The field
+   * survives because the `/v1` contract still carries it and an older client
+   * may still set it — reading it as this device's event is what put a "remove
+   * from your calendar" button on a phone with nothing to remove.
+   */
   calendarEventId: string | null;
   readonly createdAt: IsoDateTime;
   updatedAt: IsoDateTime;

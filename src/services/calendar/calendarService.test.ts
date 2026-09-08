@@ -122,7 +122,15 @@ describe('addFollowUpToCalendar', () => {
   it('creates the event and reports which calendar it landed in', async () => {
     const result = await calendarService.addFollowUpToCalendar(followUp, parent);
 
-    expect(result).toEqual({ status: 'created', eventId: 'event-1', calendarTitle: 'Personal' });
+    // The calendar id as well as its title: the device mapping records where
+    // the event went, and an event id alone does not say on a phone with more
+    // than one calendar.
+    expect(result).toEqual({
+      status: 'created',
+      eventId: 'event-1',
+      calendarId: 'cal-1',
+      calendarTitle: 'Personal',
+    });
     expect(Calendar.createEventAsync).toHaveBeenCalledTimes(1);
   });
 
