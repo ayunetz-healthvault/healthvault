@@ -47,6 +47,8 @@ const objects: ObjectStore = {
   get: async () => new Uint8Array(),
   exists: async () => true,
   delete: async () => undefined,
+  prefixFor: (patientId: string) => `patients/${patientId}/`,
+  deletePrefix: async () => ({ objects: 0 }),
 };
 
 const PATIENT = 'pat_1';
@@ -57,9 +59,12 @@ let app: FastifyInstance;
 let access: ReturnType<typeof inMemoryAccessRepository>;
 let patients: ReturnType<typeof inMemoryPatientRepository>;
 let enqueued: ProcessingJob[];
+/** Set by a test to make the queue refuse the job. */
+let queueRefuses = false;
 
 const queue: JobQueue = {
   enqueue: async (job) => {
+    if (queueRefuses) throw new Error('queue unavailable');
     enqueued.push(job);
   },
   receive: async () => [],
@@ -108,6 +113,7 @@ beforeEach(async () => {
   access = inMemoryAccessRepository();
   patients = inMemoryPatientRepository();
   enqueued = [];
+  queueRefuses = false;
   app = buildApp({
     stack: loadStackConfig(),
     identity,
@@ -289,6 +295,78 @@ describe('a record being erased', () => {
     });
 
     expect((await resume('acc_alice')).statusCode).toBe(410);
+    expect(enqueued).toEqual([]);
+  });
+});
+
+/**
+ * What happens when the queue itself is the thing that fails.
+ *
+ * The order used to be: move the record to `queued`, clearing the
+ * `ai_not_permitted` that makes a resume eligible, and then enqueue. A queue
+ * that refused left the report saying "waiting to be read" with no job in
+ * existence — and the next resume refused it as "not waiting on a consent
+ * decision", because the state it needed had already been spent. There was no
+ * way back except deleting the report and photographing it again.
+ */
+describe('when the queue refuses the job', () => {
+  it('puts the record back exactly as it was', async () => {
+    await agree(true);
+    queueRefuses = true;
+
+    const response = await resume('acc_alice');
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ code: 'queue_unavailable', retryable: true });
+    expect(await patients.getProcessing(PATIENT, DOCUMENT)).toMatchObject({
+      status: 'manual_review',
+      failureCode: 'ai_not_permitted',
+    });
+  });
+
+  it('leaves the next attempt able to succeed', async () => {
+    await agree(true);
+    queueRefuses = true;
+    await resume('acc_alice');
+
+    queueRefuses = false;
+    const retry = await resume('acc_alice');
+
+    expect(retry.statusCode).toBe(202);
+    expect(enqueued).toHaveLength(1);
+  });
+});
+
+/**
+ * And when the queue accepted the job but the caller never heard so.
+ *
+ * A phone that loses the response retries. The document is `queued` by then, so
+ * the eligibility check would have refused it — leaving a report queued with a
+ * job nobody could confirm existed. Re-queuing is the safe answer: the queue is
+ * at-least-once by design, and the worker refuses a document it has finished.
+ */
+describe('a resume whose response was lost', () => {
+  it('queues it again rather than refusing', async () => {
+    await agree(true);
+    await resume('acc_alice');
+
+    const retry = await resume('acc_alice');
+
+    expect(retry.statusCode).toBe(202);
+    expect(retry.json()).toMatchObject({ requeued: true, processing: { status: 'queued' } });
+    expect(enqueued).toHaveLength(2);
+  });
+
+  it('still refuses a document that is genuinely finished', async () => {
+    await agree(true);
+    await patients.putProcessing(PATIENT, {
+      documentId: DOCUMENT,
+      status: 'ready',
+      attempts: 1,
+      updatedAt: NOW,
+    });
+
+    expect((await resume('acc_alice')).statusCode).toBe(409);
     expect(enqueued).toEqual([]);
   });
 });

@@ -452,14 +452,26 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
       );
 
       /**
-       * Only the no-consent case resumes here.
+       * Only the no-consent case resumes here — and the retry of one.
        *
        * A document that failed OCR is not waiting for permission, and re-queuing
        * it would spend another OCR run and another provider call to reach the
        * same conclusion. A document already `ready` has its summary. Both are
        * told what state they are actually in rather than being silently ignored.
+       *
+       * `queued` is accepted because of what a resume does: it moves the record
+       * out of `ai_not_permitted` and then enqueues. A caller that lost the
+       * response — or a process that died between those two steps — would
+       * otherwise find the state it needs to retry already spent, and a report
+       * could sit at `queued` with no job in the queue and no way to ask again.
+       * Re-enqueuing is safe: the queue is at-least-once by design, and the
+       * worker refuses a document it has already finished.
        */
-      if (processing === null || processing.failureCode !== 'ai_not_permitted') {
+      const resumable =
+        processing !== null &&
+        (processing.failureCode === 'ai_not_permitted' || processing.status === 'queued');
+
+      if (!resumable) {
         return reply.code(409).send({
           code: 'not_waiting_on_consent' as const,
           message: 'This document is not waiting on a consent decision.',
@@ -496,12 +508,30 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
         updatedAt: now,
       });
 
-      await queue.enqueue({
-        patientId: params.data.patientId,
-        documentId: document.documentId,
-        pageCount: document.pageCount,
-        attemptToken: `${document.documentId}#resume-${now}`,
-      });
+      /**
+       * If the queue refuses the job, the record goes back as it was.
+       *
+       * Otherwise the document is left saying `queued` with nothing queued, and
+       * the state a resume needs — `ai_not_permitted` — has been spent: the next
+       * attempt would be refused as "not waiting on a consent decision", and the
+       * report would sit waiting for a job that does not exist. Restoring it
+       * makes the failure exactly as retryable as it looks.
+       */
+      try {
+        await queue.enqueue({
+          patientId: params.data.patientId,
+          documentId: document.documentId,
+          pageCount: document.pageCount,
+          attemptToken: `${document.documentId}#resume-${now}`,
+        });
+      } catch {
+        await patients.putProcessing(params.data.patientId, processing);
+        return reply.code(503).send({
+          code: 'queue_unavailable' as const,
+          message: 'The document could not be queued just now. Nothing has changed; try again.',
+          retryable: true,
+        });
+      }
 
       await patients.appendAudit({
         eventId: `${now}-processing-resumed`,
@@ -515,6 +545,8 @@ export const documentRoutes: FastifyPluginAsync<DocumentRoutesOptions> = async (
 
       return reply.code(202).send({
         processing: await patients.getProcessing(params.data.patientId, document.documentId),
+        /** True when this call re-queued a document a previous one had queued. */
+        requeued: processing.status === 'queued',
       });
     },
   );
