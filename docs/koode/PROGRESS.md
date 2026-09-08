@@ -24,7 +24,7 @@ never hidden by closing the parent story.
 | KOO-10 | Implemented locally | Schedules confirmed by a person, doses from `occurrences.ts`, Today wired to both |
 | KOO-11 | Implemented locally | Observation entry and visit preparation built on the tested model; **no `/v1` endpoint yet, so they stay on one phone** |
 | KOO-12 | Implemented locally | Follow-up CRUD over `/v1`, one identity end to end, shared both ways; per-device calendar confirmation kept |
-| KOO-13 | Implemented locally | Consent stored, versioned and enforced; per-record export saved to a file; erasure fenced and resumable |
+| KOO-13 | Implemented locally | Consent stored, versioned and enforced; per-record export saved to a file; erasure fenced by a durable tombstone, resumable, swept by prefix |
 | KOO-14 | Blocked | Startup safety guard implemented and tested; **every cloud step needs an account this session has none of** |
 | KOO-15 | Partly satisfied | Both gates run and recorded below; **no device, no cloud, no live provider journey** |
 
@@ -454,10 +454,16 @@ difference between leaving a family and deleting a record, and what deletion
 cannot reach.
 
 **Built since:** the consent store and its endpoints (round two), the per-record
-export and deletion (round two), and in round three the parts of both that were
-still promises — an export that writes a file for the person to keep, and an
-erasure that fences writes, follows every query page and can be finished after an
-interruption.
+export and deletion (round two), and in rounds three and four the parts of both
+that were still promises — an export that writes a file for the person to keep,
+and an erasure that fences every write with a condition carried into the write
+itself, sweeps objects by prefix, survives interruption, and leaves a tombstone
+so a paused write cannot resurrect the record afterwards.
+
+**What the export is not.** A snapshot, not a backup: the links to the original
+pages inside it are short-lived and stop working, so a file kept for a year holds
+the summaries, corrections and consent history but not the scans. The response
+says how long those links last, and the screen repeats it.
 
 ## KOO-14 — Controlled cloud environment and operational recovery
 
@@ -478,18 +484,18 @@ does not have. None is marked complete.
 
 ### Gates actually run, at the end of this work
 
-Commit `9c0aa01`, 2026-09-08, at the end of review round three. The round-two
-numbers (`a999da8`: 844 app tests, 590 backend) are kept in the round-two
-section below so the two rounds can be compared.
+Commit `b9e3c47`, 2026-09-08, at the end of review round four. Earlier rounds'
+numbers are kept in their own sections below so the rounds can be compared
+(`a999da8`: 844 app / 590 backend; `9c0aa01`: 885 app / 628 backend).
 
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit` (app) | **pass**, exit 0 |
 | `npx eslint .` (app) | **pass**, exit 0 |
-| `npx jest` (app) | **pass** — **885 tests / 58 suites** (371 at baseline) |
+| `npx jest` (app) | **pass** — **897 tests / 58 suites** (371 at baseline) |
 | `npx tsc --noEmit` (backend) | **pass**, exit 0 |
 | `npx eslint .` (backend) | **pass**, exit 0 |
-| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **628 passed, 92 skipped** (410 / 79 at baseline) |
+| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **643 passed, 92 skipped** (410 / 79 at baseline) |
 | `npx vitest run` (backend, no skip) | **fail** — the same 6 `tesseractOcr` tests, unchanged from baseline and environmental |
 
 ### The two blocked gates, with their actual errors
@@ -651,6 +657,67 @@ in-memory repository, or a faked DynamoDB client. The two blocked gates are
 unchanged. **No document has travelled from a camera through upload, a worker, a
 provider and back to a second account's screen**, and no follow-up has crossed a
 real network between two accounts. The readiness levels below are unchanged.
+
+## Review round four — five findings against the round-three work
+
+Reviewed at `f63f6e7`, with four of the five reproduced by the reviewer against
+the fetched source. All five are fixed.
+
+| # | Item | Outcome | Commit |
+| --- | --- | --- | --- |
+| 1 | The deletion marker did not atomically prevent writes | **Fixed** | `c44c649` |
+| 2 | Follow-up creation was a check-then-write, not idempotent under concurrency | **Fixed** | `dc788ec` |
+| 3 | A pending local deletion was undone by the next pull | **Fixed** | `d0656f8` |
+| 4 | Calendar ids from another device were applied locally | **Fixed** | `b9e3c47` |
+| 5 | A failed queue send made the resume endpoint unretryable | **Fixed** | `ea3b39e` |
+
+**1 — The write guard.** Round three read the marker and then wrote, which is a
+race whatever the gap: the erasure could complete between the two, and the
+summary landed in the partition it had just emptied. The condition now travels
+with the write — every clinical write is a transaction carrying a check that the
+marker does not exist — so it is evaluated at commit rather than when the handler
+last looked. That covers the two writes that were missed as well: the
+`processing` row at the start of a run, and the failure row in the catch path.
+The marker is no longer removed at the end but becomes a **tombstone**, which is
+what refuses a write that was paused during the sweep and resumed after it: the
+one row an erasure leaves behind, holding a patient id, who asked and when.
+Objects are swept **by prefix** rather than by keys derived from rows, because
+bytes uploaded through a URL signed before the deletion have no row to derive a
+key from; the prefix is swept again after the rows go, and the response reports
+the window in which a presigned URL can still write, rather than implying the
+bytes are certainly all gone.
+
+**2 — The claim.** A read followed by a write is not idempotency. One item per
+follow-up id, written with `attribute_not_exists` in the same transaction as the
+row, so exactly one of two racing creates commits; the loser is answered with the
+task that exists. Keyed by the id alone, because the row's key contains the due
+date and a rescheduled task would otherwise escape its own guard — rescheduling
+is now a move, in one transaction, leaving the claim alone. The claim outlives
+the row, carrying `deletedAt`, so a delayed duplicate cannot resurrect a deleted
+appointment.
+
+**3 — Pending deletions.** The merge knew which ids had queued changes but not
+what they were, and a delete has no local row to protect: the screen removes it
+before queueing the request. The operation now travels with the id. An
+unreadable outbox is a third answer, `unknown`, and stops the follow-up merge
+entirely — reading a queue error as "no local changes" is exactly how somebody's
+deletion comes back.
+
+**4 — Calendar ids.** `calendarMappings` was written, tested and had no caller.
+It has one now: the screen asks the device mapping whether *this* phone has an
+event, nothing about an event is pushed, a pulled follow-up always arrives with a
+null event id, and `attachCalendarEvent` is gone from the store.
+
+**5 — Resume.** A queue refusal restores the record and answers 503 retryable,
+instead of leaving the report queued with the state a retry needs already spent.
+A resume whose response was lost re-enqueues rather than being refused.
+
+**What these still do not prove.** The transaction conditions and the claim are
+DynamoDB semantics, and the 92 stack-dependent tests remain unrun, so they are
+demonstrated against the in-memory fake and a faked DynamoDB client — the fake
+models the refusals, which is what the routes are written against, but only the
+real service can show two writers actually racing. The share sheet still needs an
+iPhone. The rest of the limits below are unchanged.
 
 ## Resume checkpoint
 

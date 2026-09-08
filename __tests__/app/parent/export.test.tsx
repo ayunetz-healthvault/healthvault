@@ -134,6 +134,13 @@ describe('taking a copy of this person’s record', () => {
    * an export somebody understands and one they discover is half-empty a week
    * later.
    */
+  /** Before the button, not after the file exists. */
+  it('says it is a snapshot rather than a backup, before anybody taps', async () => {
+    await renderScreen();
+
+    expect(screen.getByText(/snapshot, not a backup/i)).toBeTruthy();
+  });
+
   it('says the page links inside it stop working', async () => {
     await renderScreen();
 

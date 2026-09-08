@@ -163,6 +163,17 @@ export default function RecordExportScreen(): React.JSX.Element {
           corrections people made to them, what has been agreed to, and who did what. Nobody
           else’s record is included.
         </Text>
+        {/*
+          Said before the button, not after the file exists. The links to the
+          original scans inside the copy are short-lived by design — a
+          permanent URL to somebody's medical images is the thing this system
+          avoids — so a copy kept for a year holds the summaries and not the
+          scans. Somebody keeping it as their only copy should know that now.
+        */}
+        <Text variant="caption" tone="muted">
+          A snapshot, not a backup: the links to the original scans inside it stop working after
+          a few minutes, so keep the reports themselves somewhere too.
+        </Text>
         <Button
           label="Assemble a copy"
           variant="secondary"
