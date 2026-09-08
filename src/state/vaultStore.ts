@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
@@ -7,7 +6,7 @@ import { isDemoBuild } from '@/config/env';
 import { MOCK_DOCUMENTS, MOCK_SUMMARIES } from '@/mocks/documents';
 import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
-import { STORAGE_KEYS } from '@/services/storage/persistence';
+import { activeVaultStorage } from '@/services/storage/activeVault';
 import type {
   DocumentSummary,
   FollowUp,
@@ -32,6 +31,18 @@ import { createId } from '@/utils/id';
  *
  * Writes are local-first. TODO(backend): each mutation below gets a matching
  * call from `endpoints`, queued and retried when offline.
+ *
+ * ## Where this is persisted
+ *
+ * Encrypted, and namespaced by the signed-in account — see `activeVault.ts`.
+ * The store itself knows nothing about accounts: the storage adapter resolves
+ * the current one on every call, so signing in as somebody else changes what
+ * this store reads without a line here changing.
+ *
+ * Two consequences worth stating. Nothing is written while signed out. And
+ * `hydrateForAccount` must be called after a sign-in, because the middleware
+ * hydrates once at construction — when nobody was signed in and there was, by
+ * design, nothing to read.
  */
 
 interface VaultState {
@@ -78,6 +89,9 @@ interface VaultState {
   attachCalendarEvent: (id: string, eventId: string | null) => void;
   removeFollowUp: (id: string) => void;
 }
+
+/** The one name the persist middleware and the hydration path must agree on. */
+export const VAULT_STORAGE_KEY = 'vault';
 
 export const useVaultStore = create<VaultState>()(
   persist(
@@ -237,11 +251,60 @@ export const useVaultStore = create<VaultState>()(
         set((state) => ({ followUps: state.followUps.filter((followUp) => followUp.id !== id) })),
     }),
     {
-      name: STORAGE_KEYS.parents,
-      storage: createJSONStorage(() => AsyncStorage),
+      name: VAULT_STORAGE_KEY,
+      storage: createJSONStorage(() => activeVaultStorage),
     },
   ),
 );
+
+/**
+ * Re-reads the vault for whoever is signed in now.
+ *
+ * The persist middleware hydrates exactly once, when the store is created —
+ * which happens at import time, before anybody has signed in and while the
+ * storage adapter is correctly refusing to read anything. Without this call the
+ * vault would stay empty for the whole session.
+ *
+ * ## Why it checks storage before touching state
+ *
+ * The obvious implementation — clear the store, then rehydrate — destroys the
+ * records it is trying to load. The persist middleware writes on *every* state
+ * change, so clearing first saves an empty vault over the stored one, and the
+ * rehydrate that follows reads back what the clear just wrote. It only appeared
+ * to work because the write and the read race, and the read usually won.
+ *
+ * So: look first. If the account has something stored, rehydrate reads it with
+ * no destructive write in front of it. If it has nothing, the store is emptied
+ * — which is the case that matters for account switching, because otherwise the
+ * previous account's records would simply stay in memory.
+ */
+export const hydrateVaultForAccount = async (): Promise<void> => {
+  const stored = await activeVaultStorage.getItem(VAULT_STORAGE_KEY);
+
+  if (stored === null) {
+    closeVaultInMemory();
+    return;
+  }
+
+  await useVaultStore.persist.rehydrate();
+};
+
+/**
+ * Empties the vault in memory.
+ *
+ * **Detach the storage first.** The persist middleware writes on every state
+ * change, so calling this while the vault is still open for an account saves an
+ * empty vault over that account's records — a sign-out that silently deletes
+ * everything on the device. `closeVault()` then `closeVaultInMemory()`, in that
+ * order, every time.
+ *
+ * With the storage detached the rows stay where they are, encrypted under a key
+ * only that account has, so signing back in a minute later does not mean
+ * re-downloading every record. `forgetAccountLocally` is the destructive form.
+ */
+export const closeVaultInMemory = (): void => {
+  useVaultStore.setState({ parents: [], documents: [], summaries: [], followUps: [], seeded: false });
+};
 
 // ---------------------------------------------------------------------------
 // Selectors

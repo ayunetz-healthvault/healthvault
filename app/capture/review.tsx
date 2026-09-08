@@ -157,6 +157,15 @@ export default function ReviewScreen(): React.JSX.Element {
         subtitle={parent ? `For ${parent.fullName}` : undefined}
       />
 
+      {capture.storageWarning === null ? null : (
+        <Callout
+          tone="warning"
+          title="Save these soon"
+          message={capture.storageWarning}
+          testID="capture-storage-warning"
+        />
+      )}
+
       {capture.pages.map((page, index) => (
         <PageReviewTile
           key={page.id}

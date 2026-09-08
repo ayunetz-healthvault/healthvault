@@ -38,7 +38,7 @@ export default function ConfirmScreen(): React.JSX.Element {
     setNotice(null);
     setSubmitting(true);
     try {
-      signIn(await authService.confirmSignUp(email, code, password));
+      await signIn(await authService.confirmSignUp(email, code, password));
       router.replace('/');
     } catch (caught) {
       report(caught, 'We could not confirm that code. Try again.');

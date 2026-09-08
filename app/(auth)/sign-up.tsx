@@ -39,7 +39,7 @@ export default function SignUpScreen(): React.JSX.Element {
         return;
       }
 
-      signIn(await authService.signIn({ email: result.email, password }));
+      await signIn(await authService.signIn({ email: result.email, password }));
       router.replace('/');
     } catch (caught) {
       if (caught instanceof AuthError) {

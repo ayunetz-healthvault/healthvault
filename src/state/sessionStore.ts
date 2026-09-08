@@ -4,7 +4,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { appLock } from '@/services/auth/appLock';
 import { type AuthSession, authService } from '@/services/auth/authService';
+import { closeVault, openVaultFor } from '@/services/storage/activeVault';
 import { STORAGE_KEYS } from '@/services/storage/persistence';
+import { closeVaultInMemory, hydrateVaultForAccount } from '@/state/vaultStore';
 import type { AppLockMethod, AuthUser, PrivacySettings } from '@/types/domain';
 import { nowIso } from '@/utils/date';
 
@@ -65,7 +67,15 @@ interface SessionState {
   noteRestoreAttempted: () => void;
   completeOnboarding: () => void;
   acceptDisclaimer: () => void;
-  signIn: (session: AuthSession) => void;
+  /**
+   * Records the session and opens that account's encrypted vault.
+   *
+   * Asynchronous because opening the vault reads the device keychain and may
+   * migrate plaintext rows left by an earlier build. Callers await it before
+   * navigating, so the first screen renders against the right records rather
+   * than an empty vault that fills in a moment later.
+   */
+  signIn: (session: AuthSession) => Promise<void>;
   /**
    * Records which record this account is the subject of.
    *
@@ -113,18 +123,43 @@ export const useSessionStore = create<SessionState>()(
           privacy: { ...state.privacy, disclaimerAcceptedAt: nowIso() },
         })),
 
-      signIn: (session) =>
+      signIn: async (session) => {
         set({
           session,
           user: session.user,
           // A fresh sign-in is an unlock; the lock screen would be redundant.
           lockState: 'unlocked',
-        }),
+        });
+
+        // Order matters: the vault has to be pointed at this account before it
+        // is read, or the rehydrate below reads nothing and the screens render
+        // an empty record for somebody who has years of them.
+        await openVaultFor(session.user.id);
+        await hydrateVaultForAccount();
+      },
 
       setSelfRecordId: (recordId) => set({ selfRecordId: recordId }),
 
       signOut: async () => {
         await authService.signOut();
+
+        /**
+         * The records leave memory, and stay on disk.
+         *
+         * **Detach first, then clear.** The persist middleware writes on every
+         * state change, so emptying the store while it is still attached would
+         * save an empty vault over this account's records — a sign-out that
+         * quietly deletes everything on the device. In this order the clear
+         * writes nowhere.
+         *
+         * What stays is encrypted under a key only this account has, so the
+         * next person to sign in on this phone cannot read it, and this account
+         * signing back in does not have to download everything again.
+         * `forgetAccountLocally` is the destructive form, for deletion.
+         */
+        closeVault();
+        closeVaultInMemory();
+
         set({
           ...initialState,
           hydrated: true,
