@@ -5,7 +5,7 @@ import type { AccessRepository } from '../../services/access/AccessRepository.js
 import type { PatientRecordRepository } from '../../services/records/PatientRecordRepository.js';
 import type { FollowUpRecord } from '../../services/records/RecordRepository.js';
 import { requireAccess } from './requireAccess.js';
-import { callerOf, notFound } from './shared.js';
+import { beingDeleted, callerOf, notFound } from './shared.js';
 
 /**
  * Things the family has to do next: an appointment, a test, a refill.
@@ -51,9 +51,41 @@ const FOLLOW_UP_KINDS = [
   'other',
 ] as const;
 
-const STATUSES = ['scheduled', 'completed', 'cancelled'] as const;
+/**
+ * `missed` is one of these because it happens.
+ *
+ * An appointment nobody kept is a fact about the record, and it is the fact the
+ * other person most needs to see. Leaving it out meant the app could set a
+ * status the server refused, so "we missed Thursday's clinic" was saved on one
+ * phone and rejected on its way to everybody else's.
+ */
+const STATUSES = ['scheduled', 'completed', 'missed', 'cancelled'] as const;
+
+/**
+ * The id the device generated, before it had ever spoken to a server.
+ *
+ * This is the identity fix. The app writes a follow-up locally, queues it, and
+ * may not reach the server for hours; if the server minted its own id on
+ * arrival, the app would go on holding one the server has never heard of, and
+ * every later edit or deletion would be a 404. So the device's id *is* the id,
+ * and the one place it comes from is the client.
+ *
+ * It is also the idempotency key. A request that commits and loses its response
+ * on the way back is indistinguishable from one that never arrived, so the
+ * retry carries the same id and is answered with the follow-up that already
+ * exists rather than a second copy of the same appointment.
+ *
+ * Optional, and constrained: the value ends up in a sort key, so it is limited
+ * to characters that cannot forge one.
+ */
+const clientFollowUpId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9_-]+$/, 'Use letters, digits, underscore or hyphen.');
 
 const followUpDraft = z.object({
+  followUpId: clientFollowUpId.optional(),
   title: z.string().min(1).max(200),
   kind: z.enum(FOLLOW_UP_KINDS),
   dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD.'),
@@ -73,7 +105,7 @@ const followUpDraft = z.object({
   doctorCategory: z.string().min(1).max(64).nullable().optional(),
 });
 
-const followUpPatch = followUpDraft.partial().extend({
+const followUpPatch = followUpDraft.omit({ followUpId: true }).partial().extend({
   status: z.enum(STATUSES).optional(),
   calendarEventId: z.string().min(1).max(256).nullable().optional(),
 });
@@ -83,6 +115,9 @@ const invalid = (message: string) => ({
   message,
   retryable: false,
 });
+
+/** `410 Gone` for a record being erased — see `documents.ts`. */
+const RECORD_DELETING = 410;
 
 const clean = <T extends Record<string, unknown>>(record: T): T =>
   Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined)) as T;
@@ -124,9 +159,31 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
       const grant = await requireAccess(request, reply, access, params.data.patientId, 'manage_tasks');
       if (grant === null) return reply;
 
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(RECORD_DELETING).send(beingDeleted());
+      }
+
+      /**
+       * Already here.
+       *
+       * The retry of a request that committed, or the second tap of a button on
+       * a slow connection. Either way the answer is the follow-up that exists,
+       * with a 200 rather than a 201 so a caller can tell the two apart — and
+       * no second audit entry, because nothing was created.
+       */
+      if (body.data.followUpId !== undefined) {
+        const existing = await patients.getFollowUp(
+          params.data.patientId,
+          body.data.followUpId,
+        );
+        if (existing !== null) return reply.code(200).send({ followUp: existing });
+      }
+
       const now = new Date().toISOString();
       const followUp: FollowUpRecord = clean({
-        followUpId: `fup_${now.replace(/\D/g, '')}_${Math.random().toString(36).slice(2, 8)}`,
+        followUpId:
+          body.data.followUpId ??
+          `fup_${now.replace(/\D/g, '')}_${Math.random().toString(36).slice(2, 8)}`,
         parentId: params.data.patientId,
         title: body.data.title,
         kind: body.data.kind,
@@ -169,6 +226,10 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
 
       const grant = await requireAccess(request, reply, access, params.data.patientId, 'manage_tasks');
       if (grant === null) return reply;
+
+      if ((await patients.getDeletion(params.data.patientId)) !== null) {
+        return reply.code(RECORD_DELETING).send(beingDeleted());
+      }
 
       const existing = await patients.getFollowUp(params.data.patientId, params.data.followUpId);
       if (existing === null) return reply.code(404).send(notFound('follow-up'));

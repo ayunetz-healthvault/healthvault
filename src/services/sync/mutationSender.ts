@@ -47,6 +47,24 @@ export const sendMutation = async (mutation: Mutation): Promise<void> => {
   }
 };
 
+/**
+ * One follow-up, sent under the id the phone gave it.
+ *
+ * ## Why the id travels with the create
+ *
+ * A follow-up is written on the device and queued; the request may not leave
+ * for hours. The server used to mint its own id on arrival and the app went on
+ * holding the one it had generated, so every later change — marking the
+ * appointment done, moving it, deleting it — addressed an id the server had
+ * never heard of and came back 404. Sending `followUpId` makes the device's id
+ * the record's id, once, and every later request lands on the same row.
+ *
+ * That also makes the create idempotent. A request that commits and loses its
+ * response on the way back looks exactly like one that never arrived, and the
+ * retry carries the same id: the server answers with the task that already
+ * exists rather than a second copy of Thursday's appointment. This is the same
+ * argument as `Mutation.id` one level up, applied to the record itself.
+ */
 const sendFollowUp = async (mutation: Mutation): Promise<void> => {
   const { patientId, entityId, operation, payload } = mutation;
 
@@ -60,5 +78,29 @@ const sendFollowUp = async (mutation: Mutation): Promise<void> => {
     return;
   }
 
-  await apiClient.post(endpoints.followUps.create(patientId), payload);
+  const body =
+    payload !== null && typeof payload === 'object'
+      ? { ...(payload as Record<string, unknown>), followUpId: entityId }
+      : { followUpId: entityId };
+
+  const { followUp } = await apiClient.post<{ followUp: { followUpId: string } }>(
+    endpoints.followUps.create(patientId),
+    body,
+  );
+
+  /**
+   * The response is read rather than discarded, and disagreement is loud.
+   *
+   * A server that answered with a different id would put this device back where
+   * it started — holding a local id nothing else knows — and the failure would
+   * show up later as a 404 on an edit, a long way from its cause. There is no
+   * silent reconciliation here on purpose: the id is the device's to set, and a
+   * server that overrode it is a contract violation, not a merge.
+   */
+  if (followUp?.followUpId !== undefined && followUp.followUpId !== entityId) {
+    throw new ApiError(
+      'conflict',
+      'The server saved this follow-up under a different id, so later changes to it could not be sent.',
+    );
+  }
 };

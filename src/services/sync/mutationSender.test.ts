@@ -29,11 +29,11 @@ const mutation = (patch: Partial<Mutation> = {}): Mutation => ({
   ...patch,
 });
 
-const ok = () => ({
+const ok = (body: unknown = { followUp: { followUpId: 'fup_1' } }) => ({
   ok: true,
   status: 200,
   headers: { get: () => null },
-  text: async () => JSON.stringify({}),
+  text: async () => JSON.stringify(body),
 });
 
 const requested = (): { url: string; method: string } => {
@@ -103,5 +103,55 @@ describe('a change with nowhere to go', () => {
     await expect(sendMutation(mutation({ entity: 'observation' }))).rejects.toThrow(
       /saved on this phone/i,
     );
+  });
+});
+
+/**
+ * The id that has to survive the round trip.
+ *
+ * The bug: the device wrote a follow-up with its own id, the server minted a
+ * different one, and every later change addressed a row the server had never
+ * heard of. The fix is one field, and these are the properties that make it
+ * worth having.
+ */
+describe('the id a created follow-up is saved under', () => {
+  it('is sent with the create', async () => {
+    await sendMutation(mutation());
+
+    const [, init] = fetchMock.mock.calls[0] as [string, { body: string }];
+    expect(JSON.parse(init.body)).toMatchObject({ followUpId: 'fup_1', title: 'Eye clinic' });
+  });
+
+  /**
+   * The same id on a retry is what makes a lost response harmless: the server
+   * recognises it rather than creating Thursday's appointment twice.
+   */
+  it('is the same on a retry of the same change', async () => {
+    const queued = mutation();
+
+    await sendMutation(queued);
+    await sendMutation(queued);
+
+    const bodies = fetchMock.mock.calls.map(
+      ([, init]) => JSON.parse((init as { body: string }).body) as { followUpId: string },
+    );
+    expect(bodies.map((body) => body.followUpId)).toEqual(['fup_1', 'fup_1']);
+  });
+
+  /**
+   * A server that answered with a different id would leave this device holding
+   * a local id nothing else knows, and the failure would surface much later as
+   * a 404 on an edit. Better to fail here, where the cause is visible.
+   */
+  it('is a conflict when the server answers with a different one', async () => {
+    fetchMock.mockResolvedValue(ok({ followUp: { followUpId: 'fup_server_9' } }));
+
+    await expect(sendMutation(mutation())).rejects.toMatchObject({ kind: 'conflict' });
+  });
+
+  it('accepts a response that does not echo the follow-up at all', async () => {
+    fetchMock.mockResolvedValue(ok({}));
+
+    await expect(sendMutation(mutation())).resolves.toBeUndefined();
   });
 });

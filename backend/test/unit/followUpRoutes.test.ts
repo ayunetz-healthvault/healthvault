@@ -283,3 +283,111 @@ describe('removing one', () => {
     );
   });
 });
+
+/**
+ * The identity a follow-up keeps from the moment somebody types it.
+ *
+ * The bug these describe: the app wrote a task locally with its own id, posted
+ * it, and the server minted a different one. The app went on holding an id the
+ * server had never heard of, so the next edit — marking the appointment done —
+ * was a 404 against a task that plainly existed. And a request that committed
+ * but lost its response on the way back created a second appointment on retry,
+ * because nothing tied the two attempts together.
+ */
+describe('the id the device generated', () => {
+  it('is the id the record keeps', async () => {
+    const response = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(response.statusCode).toBe(201);
+    expect(idOf(response)).toBe('fup_local_1');
+  });
+
+  it('answers a retry with the task that already exists, not a second one', async () => {
+    const first = await create('acc_alice', { followUpId: 'fup_local_1' });
+    // The same request again: the phone never saw the first response.
+    const retry = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(first.statusCode).toBe(201);
+    // 200, not 201: nothing was created this time, and a caller can tell.
+    expect(retry.statusCode).toBe(200);
+    expect(idOf(retry)).toBe('fup_local_1');
+    expect(await patients.listFollowUps(PATIENT)).toHaveLength(1);
+  });
+
+  it('does not audit a retry as a second creation', async () => {
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    const created = (await patients.listAudit(PATIENT)).filter(
+      (entry) => entry.action === 'follow_up_created',
+    );
+    expect(created).toHaveLength(1);
+  });
+
+  /**
+   * The whole journey the review asked for: create, lose the response, retry,
+   * edit, delete. One task throughout, and no 404 at any point.
+   */
+  it('survives create → timeout → retry → edit → delete as one task', async () => {
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    const edited = await patch('acc_alice', 'fup_local_1', { status: 'completed' });
+    expect(edited.statusCode).toBe(200);
+    expect(edited.json()).toMatchObject({ followUp: { status: 'completed' } });
+
+    const removed = await app.inject({
+      method: 'DELETE',
+      url: `/v1/patients/${PATIENT}/follow-ups/fup_local_1`,
+      headers: await auth('acc_alice'),
+    });
+
+    expect(removed.statusCode).toBe(204);
+    expect(await patients.listFollowUps(PATIENT)).toEqual([]);
+  });
+
+  /**
+   * A retry that arrives after the date was changed gets the task as it stands.
+   * Returning the original draft would tell the phone its edit had been undone.
+   */
+  it('answers a late retry with the current version of the task', async () => {
+    await create('acc_alice', { followUpId: 'fup_local_1' });
+    await patch('acc_alice', 'fup_local_1', { dueDate: '2026-11-02' });
+
+    const retry = await create('acc_alice', { followUpId: 'fup_local_1' });
+
+    expect(retry.json()).toMatchObject({ followUp: { dueDate: '2026-11-02' } });
+    expect(await patients.listFollowUps(PATIENT)).toHaveLength(1);
+  });
+
+  /** The value becomes part of a sort key, so it cannot contain one. */
+  it('refuses an id that could forge a key', async () => {
+    expect((await create('acc_alice', { followUpId: 'fup#1' })).statusCode).toBe(400);
+  });
+
+  /** An older client that sends no id still works, and gets one. */
+  it('still mints an id for a client that does not send one', async () => {
+    const response = await create('acc_alice');
+
+    expect(response.statusCode).toBe(201);
+    expect(idOf(response)).toMatch(/^fup_/);
+  });
+});
+
+/**
+ * An appointment nobody kept.
+ *
+ * The app has always had this status; the server refused it, so the one fact
+ * the other person most needed to see — that Thursday's clinic was missed —
+ * was saved on one phone and rejected on its way to everybody else's.
+ */
+describe('a missed appointment', () => {
+  it('is a status the shared record accepts', async () => {
+    const id = idOf(await create('acc_alice'));
+
+    const response = await patch('acc_alice', id, { status: 'missed' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ followUp: { status: 'missed' } });
+  });
+});
