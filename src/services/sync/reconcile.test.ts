@@ -57,6 +57,11 @@ const server = (
   failing: Record<string, number> = {},
   summaries: Record<string, unknown> = {},
   followUps: Record<string, unknown[]> = {},
+  dailyCare: {
+    observations?: unknown[];
+    treatments?: unknown[];
+    doseEvents?: unknown[];
+  } = {},
 ): void => {
   fetchMock.mockImplementation(async (requested: string) => {
     const url = String(requested);
@@ -88,6 +93,33 @@ const server = (
         status: 200,
         headers: { get: () => null },
         text: async () => JSON.stringify({ summary: stored }),
+      };
+    }
+
+    // The daily-care lists, empty unless a test says otherwise. Named here so
+    // a pull that fetches them does not fall through to the 404 below.
+    if (/\/observations$/.test(url)) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ observations: dailyCare.observations ?? [] }),
+      };
+    }
+    if (/\/treatments$/.test(url)) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ treatments: dailyCare.treatments ?? [] }),
+      };
+    }
+    if (/\/dose-events$/.test(url)) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        text: async () => JSON.stringify({ doseEvents: dailyCare.doseEvents ?? [] }),
       };
     }
 

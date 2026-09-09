@@ -8,6 +8,11 @@ import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
 import { activeVaultStorage } from '@/services/storage/activeVault';
 import { mergeDocuments } from '@/services/sync/mergeDocuments';
+import {
+  mergeDoseEvents,
+  mergeObservations,
+  mergeSchedules,
+} from '@/services/sync/mergeDailyCare';
 import { mergeFollowUps, type PendingChange } from '@/services/sync/mergeFollowUps';
 import type {
   DocumentSummary,
@@ -106,6 +111,10 @@ export interface AppliedPull {
   readonly summaries: Record<string, DocumentSummary>;
   /** The shared task list, keyed by patient. */
   readonly followUpsByPatient: Record<string, FollowUp[]>;
+  /** What daily care produced elsewhere, keyed by patient. */
+  readonly observationsByPatient: Record<string, Observation[]>;
+  readonly schedulesByPatient: Record<string, TreatmentSchedule[]>;
+  readonly doseEventsByPatient: Record<string, DoseEvent[]>;
   /**
    * Follow-up changes still queued on this device, or `unknown` when the outbox
    * could not be read.
@@ -116,6 +125,13 @@ export interface AppliedPull {
    * travels with the id — see `mergeFollowUps`.
    */
   readonly pendingFollowUps: readonly PendingChange[] | 'unknown';
+  /**
+   * Queued changes to notes and medicines, or `unknown`.
+   *
+   * Dose events need no equivalent: they are append-only, so the merge is a
+   * union and a union cannot lose an unsent change.
+   */
+  readonly pendingDailyCare: readonly PendingChange[] | 'unknown';
   readonly removedPatientIds: string[];
 }
 
@@ -418,7 +434,11 @@ export const useVaultStore = create<VaultState>()(
         documentsByPatient,
         summaries,
         followUpsByPatient,
+        observationsByPatient,
+        schedulesByPatient,
+        doseEventsByPatient,
         pendingFollowUps,
+        pendingDailyCare,
         removedPatientIds,
       }) =>
         set((state) => {
@@ -475,6 +495,23 @@ export const useVaultStore = create<VaultState>()(
               remoteByPatient: followUpsByPatient,
               removedPatientIds,
               pending: pendingFollowUps,
+            }),
+            observations: mergeObservations({
+              local: state.observations,
+              remoteByPatient: observationsByPatient,
+              removedPatientIds,
+              pending: pendingDailyCare,
+            }),
+            schedules: mergeSchedules({
+              local: state.schedules,
+              remoteByPatient: schedulesByPatient,
+              removedPatientIds,
+              pending: pendingDailyCare,
+            }),
+            doseEvents: mergeDoseEvents({
+              local: state.doseEvents,
+              remoteByPatient: doseEventsByPatient,
+              removedPatientIds,
             }),
           };
         }),

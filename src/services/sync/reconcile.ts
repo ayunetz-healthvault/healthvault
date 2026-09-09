@@ -12,6 +12,8 @@ import type {
   MedicalDocument,
   ParentProfile,
 } from '@/types/domain';
+import type { Observation, ObservationImpact } from '@/types/observations';
+import type { DoseEvent, DoseState, TreatmentSchedule } from '@/types/treatment';
 
 /**
  * Reading the shared record back.
@@ -61,6 +63,17 @@ export interface PulledRecords {
    * else — the endpoint was there, and nothing ever called it.
    */
   readonly followUpsByPatient: Record<string, FollowUp[]>;
+  /**
+   * What daily care produced, keyed by patient.
+   *
+   * The three records a carer actually creates. Pulled for the same reason
+   * follow-ups are: a note written by whoever was there is worth nothing to
+   * the person who comes next if it stays on the first phone, and a dose
+   * nobody else can see is how two people give the same tablet twice.
+   */
+  readonly observationsByPatient: Record<string, Observation[]>;
+  readonly schedulesByPatient: Record<string, TreatmentSchedule[]>;
+  readonly doseEventsByPatient: Record<string, DoseEvent[]>;
   /** Patients that were cached and are no longer reachable. */
   readonly removedPatientIds: string[];
 }
@@ -121,6 +134,52 @@ interface RemoteFollowUp {
   readonly calendarEventId?: string | null | undefined;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+interface RemoteObservation {
+  readonly observationId: string;
+  readonly parentId: string;
+  readonly text: string;
+  readonly occurredAt: string;
+  readonly impact: string;
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+  readonly recordedAt: string;
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+interface RemoteSchedule {
+  readonly scheduleId: string;
+  readonly parentId: string;
+  readonly name: string;
+  readonly dosage: string;
+  readonly times: string[];
+  readonly timezone: string;
+  readonly startDate: string;
+  readonly endDate?: string | null | undefined;
+  readonly provenance: string;
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
+  readonly supersededAt?: string | null | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+interface RemoteDoseEvent {
+  readonly eventId: string;
+  readonly parentId: string;
+  readonly scheduleId: string;
+  readonly occurrenceKey: string;
+  readonly occurrenceAt: string;
+  readonly state: string;
+  readonly recordedAt: string;
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+  readonly supersedesEventId?: string | null | undefined;
+  readonly undo: boolean;
+  readonly createdAt: string;
 }
 
 interface RemoteSummary {
@@ -233,6 +292,84 @@ const toDocument = (remote: RemoteDocument): MedicalDocument => {
   };
 };
 
+const IMPACTS: readonly ObservationImpact[] = ['a_little', 'moderately', 'a_lot'];
+
+/**
+ * A note from somebody else's phone.
+ *
+ * The text arrives unchanged, which is the whole point of it. An impact this
+ * app does not recognise reads as `a_little` — the mildest of the three —
+ * because the alternative is a screen rendering a value it has no label for,
+ * and overstating how much somebody said a symptom affected them is the worse
+ * way to be wrong.
+ */
+const toObservation = (remote: RemoteObservation): Observation => ({
+  id: remote.observationId,
+  patientId: remote.parentId,
+  text: remote.text,
+  occurredAt: remote.occurredAt,
+  impact: IMPACTS.includes(remote.impact as ObservationImpact)
+    ? (remote.impact as ObservationImpact)
+    : 'a_little',
+  recordedBy: remote.recordedBy,
+  recordedBySelf: remote.recordedBySelf,
+  recordedAt: remote.recordedAt,
+  version: remote.version,
+  updatedAt: remote.updatedAt,
+});
+
+/**
+ * A medicine somebody confirmed, from wherever they confirmed it.
+ *
+ * `source` comes back as a document reference with page 1: the server keeps
+ * the document id, not the page, and the page only ever decided where a
+ * "check the original" link landed.
+ */
+const toSchedule = (remote: RemoteSchedule): TreatmentSchedule => ({
+  id: remote.scheduleId,
+  patientId: remote.parentId,
+  name: remote.name,
+  dosage: remote.dosage,
+  times: [...remote.times].sort(),
+  timezone: remote.timezone,
+  startDate: remote.startDate,
+  endDate: remote.endDate ?? null,
+  provenance: remote.provenance === 'from_document' ? 'from_document' : 'manual',
+  source: remote.sourceDocumentId ? { documentId: remote.sourceDocumentId, page: 1 } : null,
+  confirmedBy: remote.confirmedBy,
+  confirmedAt: remote.confirmedAt,
+  supersededAt: remote.supersededAt ?? null,
+  createdAt: remote.createdAt,
+  updatedAt: remote.updatedAt,
+});
+
+/**
+ * One dose event, exactly as the person who pressed the button left it.
+ *
+ * A state this app does not recognise is dropped by the caller rather than
+ * guessed at: `taken` and `missed` are the only two answers anybody can give,
+ * and inventing a third — or worse, reading an unknown one as `missed` —
+ * would put a claim in the record that nobody made.
+ */
+const toDoseEvent = (remote: RemoteDoseEvent): DoseEvent | null => {
+  if (remote.state !== 'taken' && remote.state !== 'missed') return null;
+
+  return {
+    id: remote.eventId,
+    patientId: remote.parentId,
+    scheduleId: remote.scheduleId,
+    occurrenceKey: remote.occurrenceKey,
+    occurrenceAt: remote.occurrenceAt,
+    state: remote.state as DoseState,
+    recordedAt: remote.recordedAt,
+    recordedBy: remote.recordedBy,
+    recordedBySelf: remote.recordedBySelf,
+    supersedesEventId: remote.supersedesEventId ?? null,
+    undo: remote.undo,
+    createdAt: remote.createdAt,
+  };
+};
+
 const FOLLOW_UP_KINDS: readonly FollowUpKind[] = [
   'doctor_visit',
   'lab_test',
@@ -335,6 +472,9 @@ export const pullRecords = async (
   const documentsByPatient: Record<string, MedicalDocument[]> = {};
   const summariesByDocumentId: Record<string, DocumentSummary> = {};
   const followUpsByPatient: Record<string, FollowUp[]> = {};
+  const observationsByPatient: Record<string, Observation[]> = {};
+  const schedulesByPatient: Record<string, TreatmentSchedule[]> = {};
+  const doseEventsByPatient: Record<string, DoseEvent[]> = {};
 
   for (const { patient } of patients) {
     try {
@@ -356,6 +496,34 @@ export const pullRecords = async (
       // An older server that does not send the field is read as "no tasks",
       // not as a crash mid-pull that would lose the documents fetched above.
       followUpsByPatient[patient.patientId] = (followUps ?? []).map(toFollowUp);
+
+      /**
+       * The daily-care records, in the same pass and the same try.
+       *
+       * Three more requests per patient, which is the honest cost of these
+       * being shared at all: a note and a dose are what the second carer opens
+       * the app to see.
+       */
+      const [notes, medicines, doses] = await Promise.all([
+        apiClient.get<{ observations?: RemoteObservation[] }>(
+          endpoints.observations.list(patient.patientId),
+        ),
+        apiClient.get<{ treatments?: RemoteSchedule[] }>(
+          endpoints.treatments.list(patient.patientId),
+        ),
+        apiClient.get<{ doseEvents?: RemoteDoseEvent[] }>(
+          endpoints.doseEvents.list(patient.patientId),
+        ),
+      ]);
+
+      observationsByPatient[patient.patientId] = (notes.observations ?? []).map(toObservation);
+      schedulesByPatient[patient.patientId] = (medicines.treatments ?? []).map(toSchedule);
+      // A dose event whose state this app cannot read is dropped rather than
+      // guessed at — see `toDoseEvent`.
+      doseEventsByPatient[patient.patientId] = (doses.doseEvents ?? []).flatMap((event) => {
+        const mapped = toDoseEvent(event);
+        return mapped === null ? [] : [mapped];
+      });
 
       for (const document of mapped) {
         if (document.status !== 'ready' || alreadyHeld.has(document.id)) continue;
@@ -383,6 +551,9 @@ export const pullRecords = async (
          */
         delete documentsByPatient[patient.patientId];
         delete followUpsByPatient[patient.patientId];
+        delete observationsByPatient[patient.patientId];
+        delete schedulesByPatient[patient.patientId];
+        delete doseEventsByPatient[patient.patientId];
         continue;
       }
       throw error;
@@ -394,6 +565,9 @@ export const pullRecords = async (
     documentsByPatient,
     summariesByDocumentId,
     followUpsByPatient,
+    observationsByPatient,
+    schedulesByPatient,
+    doseEventsByPatient,
     removedPatientIds: cachedPatientIds.filter((id) => !reachable.has(id)),
   };
 };

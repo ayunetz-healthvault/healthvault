@@ -117,7 +117,13 @@ const followUp = (followUpId: string, title: string, status: string) => ({
  * A whole synthetic server: the patient list, its documents, its summaries and
  * the family's shared task list.
  */
-const serve = (options: { reachable: boolean; followUps?: unknown[] }): void => {
+const serve = (options: {
+  reachable: boolean;
+  followUps?: unknown[];
+  observations?: unknown[];
+  treatments?: unknown[];
+  doseEvents?: unknown[];
+}): void => {
   fetchMock.mockImplementation(async (requested: string) => {
     const url = String(requested);
     const ok = (body: unknown) => ({
@@ -163,6 +169,10 @@ const serve = (options: { reachable: boolean; followUps?: unknown[] }): void => 
         followUps: options.followUps ?? [followUp('fup_clinic', 'Eye clinic', 'scheduled')],
       });
     }
+
+    if (url.endsWith('/observations')) return ok({ observations: options.observations ?? [] });
+    if (url.endsWith('/treatments')) return ok({ treatments: options.treatments ?? [] });
+    if (url.endsWith('/dose-events')) return ok({ doseEvents: options.doseEvents ?? [] });
 
     if (url.endsWith('/doc_done/summary')) return ok({ summary: summaryBody });
 
@@ -404,5 +414,163 @@ describe('a follow-up deleted while the phone is offline', () => {
     expect(outcome.outcome).toBe('applied');
     expect(snapshot().followUps).toEqual([]);
     expect(snapshot().documents).toHaveLength(3);
+  });
+});
+
+/**
+ * The two-carer journey these records exist for.
+ *
+ * One person writes down what they saw and records the tablet; the other opens
+ * the app and sees both. Until now all of it stayed on the first phone, which
+ * made "shared care" true of documents and false of everything a carer
+ * actually does in a day.
+ */
+describe('daily care arriving from the other carer', () => {
+  const remoteNote = {
+    observationId: 'obs_1',
+    parentId: 'pat_1',
+    text: 'Very unsteady on the stairs this morning',
+    occurredAt: '2026-09-09T02:00:00.000Z',
+    impact: 'a_lot',
+    recordedBy: 'acc_bob',
+    recordedBySelf: false,
+    recordedAt: '2026-09-09T02:30:00.000Z',
+    version: 1,
+    updatedAt: '2026-09-09T02:30:00.000Z',
+  };
+
+  const remoteMedicine = {
+    scheduleId: 'trt_1',
+    parentId: 'pat_1',
+    name: 'Metformin',
+    dosage: '500 mg',
+    times: ['20:00', '08:00'],
+    timezone: 'Asia/Kolkata',
+    startDate: '2026-09-01',
+    endDate: null,
+    provenance: 'manual',
+    confirmedBy: 'acc_bob',
+    confirmedAt: '2026-09-01T00:00:00.000Z',
+    supersededAt: null,
+    createdAt: '2026-09-01T00:00:00.000Z',
+    updatedAt: '2026-09-01T00:00:00.000Z',
+  };
+
+  const remoteDose = {
+    eventId: 'dse_1',
+    parentId: 'pat_1',
+    scheduleId: 'trt_1',
+    occurrenceKey: 'trt_1#2026-09-09#08:00',
+    occurrenceAt: '2026-09-09T02:30:00.000Z',
+    state: 'taken',
+    recordedAt: '2026-09-09T02:35:00.000Z',
+    recordedBy: 'acc_bob',
+    recordedBySelf: false,
+    supersedesEventId: null,
+    undo: false,
+    createdAt: '2026-09-09T02:35:00.000Z',
+  };
+
+  it('shows the note the other person wrote, in their words', async () => {
+    serve({ reachable: true, observations: [remoteNote] });
+
+    await pullIntoVault();
+
+    expect(snapshot().observations).toHaveLength(1);
+    expect(snapshot().observations[0]).toMatchObject({
+      text: 'Very unsteady on the stairs this morning',
+      impact: 'a_lot',
+      recordedBySelf: false,
+    });
+  });
+
+  it('shows the medicine they confirmed, with the confirmation intact', async () => {
+    serve({ reachable: true, treatments: [remoteMedicine] });
+
+    await pullIntoVault();
+
+    expect(snapshot().schedules[0]).toMatchObject({
+      name: 'Metformin',
+      // Sorted, so the first dose of the day really is first.
+      times: ['08:00', '20:00'],
+      confirmedBy: 'acc_bob',
+    });
+  });
+
+  /** The fact that stops two people giving the same tablet twice. */
+  it('shows the dose they recorded', async () => {
+    serve({ reachable: true, treatments: [remoteMedicine], doseEvents: [remoteDose] });
+
+    await pullIntoVault();
+
+    expect(snapshot().doseEvents[0]).toMatchObject({
+      occurrenceKey: 'trt_1#2026-09-09#08:00',
+      state: 'taken',
+      recordedBySelf: false,
+    });
+  });
+
+  /**
+   * A dose event this phone recorded and has not sent must survive the pull.
+   * Losing one would delete a dose somebody recorded, which is the single
+   * thing an append-only record must never do.
+   */
+  it('keeps a dose recorded here that the server has not seen', async () => {
+    serve({ reachable: true, treatments: [remoteMedicine], doseEvents: [remoteDose] });
+    useVaultStore.setState({
+      doseEvents: [
+        {
+          id: 'dse_local',
+          patientId: 'pat_1',
+          scheduleId: 'trt_1',
+          occurrenceKey: 'trt_1#2026-09-09#20:00',
+          occurrenceAt: '2026-09-09T14:30:00.000Z',
+          state: 'taken',
+          recordedAt: '2026-09-09T14:35:00.000Z',
+          recordedBy: 'usr_me',
+          recordedBySelf: true,
+          supersedesEventId: null,
+          undo: false,
+          createdAt: '2026-09-09T14:35:00.000Z',
+        },
+      ],
+    });
+
+    await pullIntoVault();
+
+    expect(snapshot().doseEvents.map((event) => event.id).sort()).toEqual(['dse_1', 'dse_local']);
+  });
+
+  it('does not accumulate duplicates across refreshes', async () => {
+    serve({
+      reachable: true,
+      observations: [remoteNote],
+      treatments: [remoteMedicine],
+      doseEvents: [remoteDose],
+    });
+
+    await pullIntoVault();
+    await pullIntoVault();
+
+    expect(snapshot().observations).toHaveLength(1);
+    expect(snapshot().schedules).toHaveLength(1);
+    expect(snapshot().doseEvents).toHaveLength(1);
+  });
+
+  it('takes all three away with the record when access is withdrawn', async () => {
+    serve({
+      reachable: true,
+      observations: [remoteNote],
+      treatments: [remoteMedicine],
+      doseEvents: [remoteDose],
+    });
+    await pullIntoVault();
+
+    serve({ reachable: false });
+    await pullIntoVault();
+
+    expect(snapshot().observations).toEqual([]);
+    expect(snapshot().schedules).toEqual([]);
+    expect(snapshot().doseEvents).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
 import type { PendingChange } from './mergeFollowUps';
+import type { Mutation } from './types';
 import { currentSyncService } from './pushService';
 import { pullRecords, toParentProfile } from './reconcile';
 
@@ -35,13 +36,15 @@ export type PullOutcome =
  * With no signed-in account there is no queue to read and nothing can be
  * waiting in it, which is genuinely empty rather than unknown.
  */
-const pendingFollowUps = async (): Promise<PendingChange[] | 'unknown'> => {
+const pendingFor = async (
+  entities: readonly Mutation['entity'][],
+): Promise<PendingChange[] | 'unknown'> => {
   const service = currentSyncService();
   if (service === null) return [];
 
   try {
     return (await service.outbox.all())
-      .filter((mutation) => mutation.entity === 'follow_up')
+      .filter((mutation) => entities.includes(mutation.entity))
       .map((mutation) => ({ entityId: mutation.entityId, operation: mutation.operation }));
   } catch {
     return 'unknown';
@@ -79,7 +82,16 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
      * travels with the id. An unreadable queue says so rather than reporting
      * nothing pending — see `mergeFollowUps`.
      */
-    const pending = await pendingFollowUps();
+    const [pending, pendingDailyCare] = await Promise.all([
+      pendingFor(['follow_up']),
+      /**
+       * Notes and medicines, together.
+       *
+       * Dose events are deliberately absent: their merge is a union, so there
+       * is nothing a pending list could protect them from.
+       */
+      pendingFor(['observation', 'treatment']),
+    ]);
 
     const existingById = new Map(before.parents.map((parent) => [parent.id, parent]));
     const parents: ParentProfile[] = pulled.patients.map(({ patient }) =>
@@ -91,7 +103,11 @@ export const pullIntoVault = async (): Promise<PullOutcome> => {
       documentsByPatient: pulled.documentsByPatient,
       summaries: pulled.summariesByDocumentId,
       followUpsByPatient: pulled.followUpsByPatient,
+      observationsByPatient: pulled.observationsByPatient,
+      schedulesByPatient: pulled.schedulesByPatient,
+      doseEventsByPatient: pulled.doseEventsByPatient,
       pendingFollowUps: pending,
+      pendingDailyCare,
       removedPatientIds: pulled.removedPatientIds,
     });
 
