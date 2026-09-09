@@ -7,7 +7,7 @@ import type {
 import type { Grant } from '../../src/services/access/policy.js';
 import type { ConsentRecord } from '../../src/services/consent/policy.js';
 import {
-  FollowUpExistsError,
+  AlreadyExistsError,
   RecordDeletedError,
   type AuditEntry,
   type DeletionMarker,
@@ -16,9 +16,12 @@ import {
 } from '../../src/services/records/PatientRecordRepository.js';
 import type {
   DocumentRecord,
+  DoseEventRecord,
   FollowUpRecord,
+  ObservationRecord,
   ProcessingRecord,
   SummaryRecord,
+  TreatmentScheduleRecord,
 } from '../../src/services/records/RecordRepository.js';
 
 /**
@@ -191,6 +194,9 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
   const audit: AuditEntry[] = [];
   const deletions = new Map<string, DeletionMarker>();
   const followUpClaims = new Map<string, { createdAt: string; deletedAt?: string }>();
+  const observations = new Map<string, ObservationRecord>();
+  const schedules = new Map<string, TreatmentScheduleRecord>();
+  const doseEvents = new Map<string, DoseEventRecord>();
 
   /**
    * The condition the real repository attaches to every write.
@@ -223,7 +229,16 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
       const prefix = `${patientId}::`;
       let items = 0;
 
-      for (const store of [documents, processing, summaries, followUps, followUpClaims]) {
+      for (const store of [
+        documents,
+        processing,
+        summaries,
+        followUps,
+        followUpClaims,
+        observations,
+        schedules,
+        doseEvents,
+      ]) {
         for (const entryKey of [...store.keys()]) {
           if (entryKey.startsWith(prefix)) {
             store.delete(entryKey);
@@ -323,7 +338,7 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
     async createFollowUp(patientId, followUp) {
       refuseIfDeleted(patientId);
       if (followUpClaims.has(key(patientId, followUp.followUpId))) {
-        throw new FollowUpExistsError(followUp.followUpId);
+        throw new AlreadyExistsError('follow_up', followUp.followUpId);
       }
 
       followUpClaims.set(key(patientId, followUp.followUpId), { createdAt: followUp.createdAt });
@@ -377,6 +392,63 @@ export const inMemoryPatientRepository = (): PatientRecordRepository => {
           deletedAt: new Date().toISOString(),
         });
       }
+    },
+
+    async createObservation(patientId, observation) {
+      refuseIfDeleted(patientId);
+      if (observations.has(key(patientId, observation.observationId))) {
+        throw new AlreadyExistsError('observation', observation.observationId);
+      }
+      observations.set(key(patientId, observation.observationId), observation);
+    },
+    async putObservation(patientId, observation) {
+      refuseIfDeleted(patientId);
+      observations.set(key(patientId, observation.observationId), observation);
+    },
+    async getObservation(patientId, observationId) {
+      return observations.get(key(patientId, observationId)) ?? null;
+    },
+    async listObservations(patientId) {
+      return [...observations.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
+    },
+    async deleteObservation(patientId, observationId) {
+      observations.delete(key(patientId, observationId));
+    },
+
+    async createSchedule(patientId, schedule) {
+      refuseIfDeleted(patientId);
+      if (schedules.has(key(patientId, schedule.scheduleId))) {
+        throw new AlreadyExistsError('treatment', schedule.scheduleId);
+      }
+      schedules.set(key(patientId, schedule.scheduleId), schedule);
+    },
+    async putSchedule(patientId, schedule) {
+      refuseIfDeleted(patientId);
+      schedules.set(key(patientId, schedule.scheduleId), schedule);
+    },
+    async getSchedule(patientId, scheduleId) {
+      return schedules.get(key(patientId, scheduleId)) ?? null;
+    },
+    async listSchedules(patientId) {
+      return [...schedules.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
+    },
+
+    /** Append-only here too: there is no update and no delete to model. */
+    async appendDoseEvent(patientId, event) {
+      refuseIfDeleted(patientId);
+      if (doseEvents.has(key(patientId, event.eventId))) {
+        throw new AlreadyExistsError('dose_event', event.eventId);
+      }
+      doseEvents.set(key(patientId, event.eventId), event);
+    },
+    async listDoseEvents(patientId) {
+      return [...doseEvents.entries()]
+        .filter(([entryKey]) => entryKey.startsWith(`${patientId}::`))
+        .map(([, value]) => value);
     },
 
     async appendConsent(record) {

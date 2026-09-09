@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import type { AccessRepository } from '../../services/access/AccessRepository.js';
 import {
-  FollowUpExistsError,
+  AlreadyExistsError,
   RecordDeletedError,
   type PatientRecordRepository,
 } from '../../services/records/PatientRecordRepository.js';
@@ -204,7 +204,7 @@ export const followUpRoutes: FastifyPluginAsync<FollowUpRoutesOptions> = async (
         if (error instanceof RecordDeletedError) {
           return reply.code(RECORD_DELETING).send(beingDeleted());
         }
-        if (!(error instanceof FollowUpExistsError)) throw error;
+        if (!(error instanceof AlreadyExistsError)) throw error;
 
         const claim = await patients.followUpClaim(
           params.data.patientId,

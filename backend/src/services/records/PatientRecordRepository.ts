@@ -21,7 +21,13 @@ import {
   patientProcessingSk,
   patientSummarySk,
   patientConsentSk,
+  patientDoseEventSk,
   patientFollowUpIdSk,
+  patientObservationSk,
+  patientTreatmentSk,
+  PATIENT_DOSE_EVENT_PREFIX,
+  PATIENT_OBSERVATION_PREFIX,
+  PATIENT_TREATMENT_PREFIX,
   PATIENT_CONSENT_PREFIX,
   PATIENT_DELETION_SK,
   PATIENT_PROFILE_SK,
@@ -30,9 +36,12 @@ import {
 } from './keys.js';
 import type {
   DocumentRecord,
+  DoseEventRecord,
   FollowUpRecord,
+  ObservationRecord,
   ProcessingRecord,
   SummaryRecord,
+  TreatmentScheduleRecord,
 } from './RecordRepository.js';
 import type { ConsentRecord } from '../consent/policy.js';
 
@@ -133,11 +142,20 @@ export class RecordDeletedError extends Error {
   }
 }
 
-/** Thrown when a follow-up id has already been used in this record. */
-export class FollowUpExistsError extends Error {
-  constructor(readonly followUpId: string) {
-    super('A follow-up with this id already exists.');
-    this.name = 'FollowUpExistsError';
+/**
+ * Thrown when an id has already been used in this record.
+ *
+ * The signal an idempotent create needs: the write was refused because the
+ * thing already exists, which is not a failure — the caller answers with what
+ * is there rather than writing a second copy of it.
+ */
+export class AlreadyExistsError extends Error {
+  constructor(
+    readonly entity: 'follow_up' | 'observation' | 'treatment' | 'dose_event',
+    readonly id: string,
+  ) {
+    super(`A ${entity.replace('_', ' ')} with this id already exists.`);
+    this.name = 'AlreadyExistsError';
   }
 }
 
@@ -229,7 +247,7 @@ export interface PatientRecordRepository {
    * The claim is a separate item keyed by the follow-up id alone, so it does
    * not move when the due date does; the row and the claim are written in one
    * transaction, and the second attempt loses at the claim rather than at the
-   * row. Throws `FollowUpExistsError` when the id is taken, so the caller can
+   * row. Throws `AlreadyExistsError` when the id is taken, so the caller can
    * answer with the task that exists instead of a second copy of it.
    */
   createFollowUp(patientId: PatientId, followUp: FollowUpRecord): Promise<void>;
@@ -270,6 +288,46 @@ export interface PatientRecordRepository {
     patientId: PatientId,
     followUpId: string,
   ): Promise<{ createdAt: string; deletedAt?: string | undefined } | null>;
+
+  /**
+   * Writes an observation for the first time, or refuses because that id is in
+   * use.
+   *
+   * The same discipline as `createFollowUp` and for the same reason: a read
+   * followed by a write lets two retries of one create both succeed, and the
+   * loser overwrites the winner. Here the row's own key is the id, so the
+   * condition goes on the row itself and no separate claim is needed.
+   */
+  createObservation(patientId: PatientId, observation: ObservationRecord): Promise<void>;
+  /** Overwrites an observation. The caller checks the version first. */
+  putObservation(patientId: PatientId, observation: ObservationRecord): Promise<void>;
+  getObservation(patientId: PatientId, observationId: string): Promise<ObservationRecord | null>;
+  listObservations(patientId: PatientId): Promise<ObservationRecord[]>;
+  deleteObservation(patientId: PatientId, observationId: string): Promise<void>;
+
+  /** Confirms a schedule. Refuses a second create under the same id. */
+  createSchedule(patientId: PatientId, schedule: TreatmentScheduleRecord): Promise<void>;
+  /**
+   * Overwrites a schedule.
+   *
+   * Used to supersede one, which is the only edit there is: the times somebody
+   * was taking a medicine at last month are part of the record, so a change is
+   * a new schedule and an end date on the old one, never a rewrite.
+   */
+  putSchedule(patientId: PatientId, schedule: TreatmentScheduleRecord): Promise<void>;
+  getSchedule(patientId: PatientId, scheduleId: string): Promise<TreatmentScheduleRecord | null>;
+  listSchedules(patientId: PatientId): Promise<TreatmentScheduleRecord[]>;
+
+  /**
+   * Appends a dose event.
+   *
+   * There is no update and no delete, here or anywhere else in this service.
+   * Undo appends an event that supersedes the earlier one, so the record of
+   * what somebody said about their tablets on Tuesday survives them changing
+   * their mind on Wednesday.
+   */
+  appendDoseEvent(patientId: PatientId, event: DoseEventRecord): Promise<void>;
+  listDoseEvents(patientId: PatientId): Promise<DoseEventRecord[]>;
 
   /**
    * Records one consent decision. Append-only.
@@ -362,6 +420,43 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
     await guarded(patientId, [
       { Put: { TableName, Item: { PK: patientPk(patientId), SK, ...body } } },
     ]);
+  };
+
+  /**
+   * A write that must be the first one for this id.
+   *
+   * `attribute_not_exists` on the row, in the same transaction as the deletion
+   * check, so two retries of one create cannot both commit and the second is
+   * told what happened rather than overwriting the first.
+   */
+  const createOnce = async (
+    patientId: PatientId,
+    SK: string,
+    body: Record<string, unknown>,
+    entity: 'observation' | 'treatment' | 'dose_event',
+    id: string,
+  ): Promise<void> => {
+    try {
+      await client.send(
+        new TransactWriteCommand({
+          TransactItems: [
+            notDeleted(patientId),
+            {
+              Put: {
+                TableName,
+                Item: { PK: patientPk(patientId), SK, ...body },
+                ConditionExpression: 'attribute_not_exists(SK)',
+              },
+            },
+          ],
+        }),
+      );
+    } catch (error) {
+      const reasons = cancellation(error);
+      if (reasons[0] === 'ConditionalCheckFailed') throw new RecordDeletedError(patientId);
+      if (reasons[1] === 'ConditionalCheckFailed') throw new AlreadyExistsError(entity, id);
+      throw error;
+    }
   };
 
   /** A write that must not be refused by the tombstone: the marker itself. */
@@ -620,7 +715,7 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
         const reasons = cancellation(error);
         if (reasons[0] === 'ConditionalCheckFailed') throw new RecordDeletedError(patientId);
         if (reasons[1] === 'ConditionalCheckFailed') {
-          throw new FollowUpExistsError(followUp.followUpId);
+          throw new AlreadyExistsError('follow_up', followUp.followUpId);
         }
         throw error;
       }
@@ -709,6 +804,78 @@ export const createPatientRecordRepository = (config: StackConfig): PatientRecor
         }),
       );
     },
+
+    /**
+     * One conditional write, no claim item.
+     *
+     * A follow-up needs a separate claim because its row key carries the due
+     * date and moves when somebody reschedules. These three are keyed by their
+     * own id, which never moves, so the row itself can carry the condition —
+     * the same guarantee for a third of the machinery.
+     */
+    createObservation: (patientId, observation) =>
+      createOnce(
+        patientId,
+        patientObservationSk(observation.observationId),
+        { ...observation },
+        'observation',
+        observation.observationId,
+      ),
+
+    putObservation: (patientId, observation) =>
+      put(patientId, patientObservationSk(observation.observationId), { ...observation }),
+
+    getObservation: (patientId, observationId) =>
+      get<ObservationRecord>(patientId, patientObservationSk(observationId)),
+
+    listObservations: (patientId) =>
+      queryPrefix<ObservationRecord>(patientId, PATIENT_OBSERVATION_PREFIX),
+
+    async deleteObservation(patientId, observationId) {
+      await client.send(
+        new DeleteCommand({
+          TableName,
+          Key: { PK: patientPk(patientId), SK: patientObservationSk(observationId) },
+        }),
+      );
+    },
+
+    createSchedule: (patientId, schedule) =>
+      createOnce(
+        patientId,
+        patientTreatmentSk(schedule.scheduleId),
+        { ...schedule },
+        'treatment',
+        schedule.scheduleId,
+      ),
+
+    putSchedule: (patientId, schedule) =>
+      put(patientId, patientTreatmentSk(schedule.scheduleId), { ...schedule }),
+
+    getSchedule: (patientId, scheduleId) =>
+      get<TreatmentScheduleRecord>(patientId, patientTreatmentSk(scheduleId)),
+
+    listSchedules: (patientId) =>
+      queryPrefix<TreatmentScheduleRecord>(patientId, PATIENT_TREATMENT_PREFIX),
+
+    /**
+     * Written once, under the id the device generated.
+     *
+     * Append-only makes idempotency free: there is no update to race with, so a
+     * retry of "I've taken it" finds the event already there and stops. What it
+     * must never do is write a second event for the same tablet.
+     */
+    appendDoseEvent: (patientId, event) =>
+      createOnce(
+        patientId,
+        patientDoseEventSk(event.eventId),
+        { ...event },
+        'dose_event',
+        event.eventId,
+      ),
+
+    listDoseEvents: (patientId) =>
+      queryPrefix<DoseEventRecord>(patientId, PATIENT_DOSE_EVENT_PREFIX),
 
     appendConsent: (consent) =>
       put(consent.patientId, patientConsentSk(consent.purpose, consent.decidedAt), { ...consent }),

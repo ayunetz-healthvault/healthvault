@@ -195,6 +195,109 @@ export interface FollowUpRecord {
   readonly updatedAt?: string | undefined;
 }
 
+/**
+ * Something a person noticed, in their own words.
+ *
+ * The server stores the words and nothing else. There is no severity, no
+ * triage category, no mapping to a clinical term — the moment this service
+ * assigns weight to "Amma felt dizzy after the new tablet" it is practising
+ * medicine on the strength of a text box, and it would be doing so where
+ * nobody can see it happening. `impact` is the person's answer about their own
+ * day, carried through unchanged.
+ */
+export interface ObservationRecord {
+  readonly observationId: string;
+  readonly parentId: string;
+  /** Exactly what was written. Never normalised, never rewritten. */
+  readonly text: string;
+  /** When it happened, which is not when it was written down. */
+  readonly occurredAt: string;
+  readonly impact: string;
+  readonly recordedBy: string;
+  /** True when the person who wrote it is the patient. */
+  readonly recordedBySelf: boolean;
+  readonly recordedAt: string;
+  /**
+   * Bumped on each edit, so a concurrent change is a conflict rather than a
+   * race. Two family members editing the same note at once is not a rare case
+   * in a record built for two family members.
+   */
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A medicine somebody has confirmed they are taking.
+ *
+ * Never created from a document by the pipeline. `confirmedBy` and
+ * `confirmedAt` are required by the type for that reason: a schedule nobody
+ * confirmed is a reading of a prescription, and turning one into reminders to
+ * take a drug is the single worst thing this system could do on its own.
+ *
+ * Superseded rather than edited, so the previous instructions stay readable —
+ * "she was on 5mg until the 3rd" is a question somebody will ask.
+ */
+export interface TreatmentScheduleRecord {
+  readonly scheduleId: string;
+  readonly parentId: string;
+  readonly name: string;
+  readonly dosage: string;
+  /** `HH:mm`, in `timezone`. A list, because "twice a day" is not a clock. */
+  readonly times: string[];
+  /** The patient's zone, not the device's — a daughter abroad sees 8:00 IST. */
+  readonly timezone: string;
+  readonly startDate: string;
+  readonly endDate?: string | null | undefined;
+  readonly provenance: string;
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
+  /** Set when a newer schedule replaces this one. The row is never deleted. */
+  readonly supersededAt?: string | null | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * Something that happened to one dose, at one moment.
+ *
+ * **Append-only, and there is no update or delete for it anywhere in this
+ * service.** Undo adds an event that supersedes the earlier one, because "did
+ * my mother take her tablet this morning" is a question about the record, and
+ * a record that can be quietly rewritten cannot answer it.
+ *
+ * That also makes idempotency trivial: an event is written once, under the id
+ * the device generated, and a retry finds it already there.
+ */
+export interface DoseEventRecord {
+  readonly eventId: string;
+  readonly parentId: string;
+  readonly scheduleId: string;
+  /**
+   * Schedule, date and time of day together: the identity of one dose.
+   *
+   * Two taps on "I've taken it" produce the same occurrence, so the second is
+   * recognised rather than recorded as a second tablet.
+   */
+  readonly occurrenceKey: string;
+  readonly occurrenceAt: string;
+  /** `taken` or `missed`. Never inferred — silence is not a missed dose. */
+  readonly state: string;
+  readonly recordedAt: string;
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+  readonly supersedesEventId?: string | null | undefined;
+  /**
+   * True when this undoes the event it supersedes.
+   *
+   * Marked rather than inferred from the states, so "taken, then corrected to
+   * missed" and "taken, then undone" stay different things. One of them is a
+   * much stronger claim than the other.
+   */
+  readonly undo: boolean;
+  readonly createdAt: string;
+}
+
 export interface RecordRepository {
   putParent(ownerId: OwnerId, parent: ParentRecord): Promise<void>;
   getParent(ownerId: OwnerId, parentId: string): Promise<ParentRecord | null>;

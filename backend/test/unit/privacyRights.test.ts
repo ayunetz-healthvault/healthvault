@@ -419,6 +419,68 @@ describe('deleting an account', () => {
  * sweep left the record quietly rebuilt around it — with the person holding a
  * response that said their medical history was gone.
  */
+/**
+ * The daily-care records, now that they exist on the server.
+ *
+ * An export that says "everything held for this person" and leaves out their
+ * notes and their medicines is a false claim in the least forgivable place.
+ */
+describe('exporting the daily-care records', () => {
+  it('includes the notes, the medicines and the doses', async () => {
+    await patients.createObservation(PATIENT, {
+      observationId: 'obs_1',
+      parentId: PATIENT,
+      text: 'Dizzy after the new tablet',
+      occurredAt: NOW,
+      impact: 'moderately',
+      recordedBy: 'acc_alice',
+      recordedBySelf: true,
+      recordedAt: NOW,
+      version: 1,
+      updatedAt: NOW,
+    });
+    await patients.createSchedule(PATIENT, {
+      scheduleId: 'trt_1',
+      parentId: PATIENT,
+      name: 'Metformin',
+      dosage: '500 mg',
+      times: ['08:00'],
+      timezone: 'Asia/Kolkata',
+      startDate: '2026-09-01',
+      provenance: 'manual',
+      confirmedBy: 'acc_alice',
+      confirmedAt: NOW,
+      createdAt: NOW,
+      updatedAt: NOW,
+    });
+    await patients.appendDoseEvent(PATIENT, {
+      eventId: 'dse_1',
+      parentId: PATIENT,
+      scheduleId: 'trt_1',
+      occurrenceKey: 'trt_1#2026-09-08#08:00',
+      occurrenceAt: NOW,
+      state: 'taken',
+      recordedAt: NOW,
+      recordedBy: 'acc_alice',
+      recordedBySelf: true,
+      undo: false,
+      createdAt: NOW,
+    });
+
+    const body = (await exportRecord('acc_alice')).json() as {
+      record: {
+        observations: unknown[];
+        treatments: unknown[];
+        doseEvents: unknown[];
+      };
+    };
+
+    expect(body.record.observations).toHaveLength(1);
+    expect(body.record.treatments).toHaveLength(1);
+    expect(body.record.doseEvents).toHaveLength(1);
+  });
+});
+
 describe('a deletion in progress', () => {
   const deleteRecordNoBody = async (accountId: string, patientId = PATIENT) =>
     app.inject({

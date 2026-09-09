@@ -101,6 +101,20 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
       patients.listAudit(patientId, 500),
     ]);
 
+    /**
+     * The daily-care records, which are most of what a person actually wrote.
+     *
+     * Added the moment they gained endpoints. An export that says "everything
+     * held for this person" and omits their notes and their medicines is a
+     * false claim in the one place where a false claim is least forgivable —
+     * somebody exercising a right to a copy of their own data.
+     */
+    const [observations, treatments, doseEvents] = await Promise.all([
+      patients.listObservations(patientId),
+      patients.listSchedules(patientId),
+      patients.listDoseEvents(patientId),
+    ]);
+
     const summaries = await Promise.all(
       documents.map((document) => patients.getSummary(patientId, document.documentId)),
     );
@@ -129,6 +143,10 @@ export const privacyRightsRoutes: FastifyPluginAsync<PrivacyRightsOptions> = asy
        */
       summaries: summaries.filter((summary) => summary !== null),
       followUps,
+      observations,
+      treatments,
+      /** Every dose event, including the ones that were undone. */
+      doseEvents,
       consent,
       audit,
       pages,

@@ -13,6 +13,7 @@ import { accessRoutes } from './routes/v1/access.js';
 import { consentRoutes } from './routes/v1/consent.js';
 import { documentRoutes } from './routes/v1/documents.js';
 import { followUpRoutes } from './routes/v1/followUps.js';
+import { dailyCareRoutes } from './routes/v1/dailyCare.js';
 import { privacyRightsRoutes } from './routes/v1/privacyRights.js';
 import { reviewRoutes } from './routes/v1/review.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
@@ -164,6 +165,7 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
     await v1.register(reviewRoutes, { access, patients, objects });
     await v1.register(consentRoutes, { access, patients });
     await v1.register(followUpRoutes, { access, patients });
+    await v1.register(dailyCareRoutes, { access, patients });
     await v1.register(privacyRightsRoutes, {
       access,
       patients,

@@ -249,3 +249,23 @@ export const PATIENT_DELETION_SK = '!DELETION';
  */
 export const patientFollowUpIdSk = (followUpId: string): string => `FUPID#${followUpId}`;
 export const PATIENT_FOLLOW_UP_ID_PREFIX = 'FUPID#';
+
+/**
+ * Observations, schedules and dose events, each keyed by its own id.
+ *
+ * Deliberately *not* keyed by a timestamp the way follow-ups are keyed by due
+ * date. That shape exists so "everything due before Friday" is one query, and
+ * it cost a transaction and a separate claim item to make rescheduling safe.
+ * None of these three has an equivalent query: a record's observations are read
+ * together and sorted for display, and a dose event never moves at all. Keying
+ * by id keeps the identity immovable, which is what makes an idempotent create
+ * a single conditional write.
+ */
+export const patientObservationSk = (observationId: string): string => `OBS#${observationId}`;
+export const PATIENT_OBSERVATION_PREFIX = 'OBS#';
+
+export const patientTreatmentSk = (scheduleId: string): string => `TRT#${scheduleId}`;
+export const PATIENT_TREATMENT_PREFIX = 'TRT#';
+
+export const patientDoseEventSk = (eventId: string): string => `DOSE#${eventId}`;
+export const PATIENT_DOSE_EVENT_PREFIX = 'DOSE#';
