@@ -9,6 +9,7 @@ import { calendarService } from '@/services/calendar/calendarService';
 import { useSessionStore } from '@/state/sessionStore';
 import { colors, spacing } from '@/theme';
 import { formatDateTime } from '@/utils/date';
+import { pluralise } from '@/utils/format';
 
 /**
  * Privacy controls.
@@ -47,9 +48,20 @@ export default function PrivacySettingsScreen(): React.JSX.Element {
   };
 
   const handleExport = async (): Promise<void> => {
-    const request = await accountService.requestDataExport();
+    const result = await accountService.requestDataExport();
+
+    /**
+     * Says what was actually produced, and where it is.
+     *
+     * The old copy promised an email with a download link. Nothing sends one,
+     * and a promise like that is the kind a person waits on for a week. The
+     * export is returned to the app; what is missing is somewhere on the phone
+     * to put it, which is stated rather than dressed up.
+     */
     setExportNotice(
-      `Export requested (${request.requestId}). In the released app you will get an email with a secure download link once it is ready.`,
+      result.outcome === 'no_backend'
+        ? 'This build has no server, so there is nothing stored away from this phone to export.'
+        : `Your data was assembled: ${pluralise(result.records.length, 'record')} you can reach. Saving it to a file from the app is not built yet, so nothing has been written to this phone.`,
     );
   };
 

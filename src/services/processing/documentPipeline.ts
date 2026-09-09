@@ -1,5 +1,4 @@
 import { summaryService, type ProcessingStage } from '../ai/summaryService';
-import { uploadService } from '../upload/uploadService';
 
 import { processDocumentOnBackend } from './devProcessingClient';
 import { toDocumentSummary } from './summaryMapper';
@@ -75,22 +74,22 @@ export const toAppStage = (backendStage: string): ProcessingStage => {
 };
 
 export const runDocumentPipeline = async (input: RunPipelineInput): Promise<PipelineResult> => {
-  const { document, parent, userId, onUploadProgress, onStage, signal } = input;
+  const { document, parent, onUploadProgress, onStage, signal } = input;
 
   if (!isBackendEnabled()) {
-    // --- Mock path: unchanged behaviour, unchanged services ----------------
-    const result = await uploadService.uploadDocument({
-      userId,
-      parentId: document.parentId,
-      documentId: document.id,
-      pages: document.pages,
-      ...(onUploadProgress === undefined
-        ? {}
-        : { onProgress: (progress) => onUploadProgress(progress.percent) }),
-      ...(signal === undefined ? {} : { signal }),
-    });
-
-    await uploadService.completeUpload(document.id, result.objectKeys);
+    /**
+     * Demonstration build: nothing is uploaded, because nothing can be.
+     *
+     * There used to be a simulated transfer here — a progress bar counting up
+     * against a fake presigned URL. It is gone. `isBackendEnabled()` is false
+     * in every demo build, so there was never a server for those bytes to go
+     * to, and a progress bar that reaches 100% having sent nothing is the kind
+     * of detail somebody demonstrates this app with and then believes.
+     *
+     * The screen is told the pages are ready straight away, which is true:
+     * they are on this device, and that is the whole of what a demo does.
+     */
+    onUploadProgress?.(100);
 
     const summary = await summaryService.processDocument(
       document,

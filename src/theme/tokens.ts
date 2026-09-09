@@ -1,53 +1,79 @@
 /**
  * Design tokens.
  *
+ * The palette is the direction approved in `docs/koode/DESIGN.md`: a deep
+ * green on warm cream, with peach for appointment context and a soft green for
+ * quiet supporting surfaces. The reference values are the named constants
+ * below; where one of them could not clear this file's contrast floor it was
+ * adjusted rather than shipped, and the adjustment is recorded at the value.
+ *
  * Accessibility constraints this palette and scale are built around:
  *  - Body text is 17pt minimum (many users are 60+ or reading in a second
  *    language); nothing user-facing goes below 14pt.
  *  - Every interactive control is at least 56pt tall — comfortably above the
  *    44pt/48dp platform minimums, because these screens are often used one-
  *    handed and in a hurry.
- *  - Foreground/background pairs below hit >= 4.5:1 on white; the `on*` colours
- *    are the tested pairings.
+ *  - Every foreground token clears 4.5:1 against *every* surface token it can
+ *    legally sit on, not just against white. `tokens.test.ts` asserts this over
+ *    the whole cross-product, so a future colour edit fails the suite rather
+ *    than shipping a combination nobody checked.
  */
 
 export const palette = {
-  // Primary — a calm teal-green. Reads as "care" without the alarm of clinical blue.
-  primary900: '#053A31',
-  primary700: '#0B6B58',
-  primary600: '#0E7C66',
-  primary500: '#12907A',
-  primary200: '#9AD7C8',
-  primary100: '#D6EFE8',
-  primary50: '#F0F8F5',
+  /**
+   * Primary — the approved deep green, `#145B48`, with a ramp built around it.
+   * Reads as "care" without the alarm of clinical blue.
+   */
+  primary900: '#0C3628',
+  primary700: '#0F4838',
+  primary600: '#145B48',
+  primary500: '#1A6E58',
+  primary200: '#A8C7BB',
+  /** The approved soft green. Supporting surfaces and quiet status. */
+  primary100: '#E8EDE0',
+  primary50: '#F3F7F0',
 
-  // Accent — warm amber for "needs your attention", never for errors.
-  accent700: '#8A4B04',
-  accent500: '#C46A05',
-  accent100: '#FDECD2',
+  /**
+   * Accent — the approved peach and its amber text partner. "Needs your
+   * attention" and appointment context, never errors.
+   */
+  accent700: '#855016',
+  accent500: '#A65F1D',
+  accent100: '#FCE6C9',
 
-  danger700: '#8E1B1B',
-  danger500: '#C62828',
-  danger100: '#FBE3E3',
+  danger700: '#7A1717',
+  danger500: '#8E1B1B',
+  danger100: '#F7E1E1',
 
-  success700: '#1B5E20',
-  success500: '#2E7D32',
-  success100: '#E1F2E2',
+  success700: '#164C1A',
+  success500: '#1B5E20',
+  success100: '#E1F0E2',
 
-  info700: '#1A4F86',
-  info500: '#1E6BB8',
-  info100: '#DCEBF9',
+  info700: '#153F6C',
+  info500: '#1A4F86',
+  info100: '#DEEAF7',
 
-  neutral900: '#101614',
-  neutral800: '#1E2A26',
-  neutral700: '#3A4A45',
-  neutral600: '#566661',
-  neutral500: '#75857F',
-  neutral400: '#A0AEA9',
-  neutral300: '#C7D1CD',
-  neutral200: '#E2E8E6',
-  neutral100: '#F1F5F3',
-  neutral50: '#F8FAF9',
+  /** The approved ink. */
+  neutral900: '#153C31',
+  neutral800: '#25453A',
+  neutral700: '#3D5548',
+  /**
+   * Secondary text. Darker than the reference's `#626D65`, which reaches only
+   * 4.44:1 on peach — just under the floor. This is the nearest tone that
+   * clears 4.5:1 on every surface in the set, and is indistinguishable from the
+   * reference value side by side.
+   */
+  neutral600: '#4E5950',
+  /** Muted text. Same story as `neutral600`; the lighter of the two safe tones. */
+  neutral500: '#5D675F',
+  /** Below here the tones are for borders and fills only — never for text. */
+  neutral400: '#9BA599',
+  neutral300: '#C9CFC2',
+  /** The approved hairline. */
+  neutral200: '#E3E4DA',
+  neutral100: '#EFF1E8',
+  /** The approved warm background. */
+  neutral50: '#FFFCF6',
   white: '#FFFFFF',
   black: '#000000',
 } as const;
@@ -57,6 +83,17 @@ export const colors = {
   surface: palette.white,
   surfaceMuted: palette.neutral100,
   surfaceAccent: palette.primary50,
+  /** Soft green. Quiet grouping and settled status. */
+  surfaceQuiet: palette.primary100,
+  /**
+   * Peach. Appointment and review context.
+   *
+   * Always carries an explicit text label: the reference uses this tone to mean
+   * two different things, and colour alone cannot say which.
+   */
+  surfaceAppointment: palette.accent100,
+  /** Secondary text on peach. `textSecondary` also clears the floor there. */
+  onSurfaceAppointment: palette.accent700,
 
   border: palette.neutral200,
   borderStrong: palette.neutral300,
@@ -88,8 +125,8 @@ export const colors = {
   infoSoft: palette.info100,
   onInfoSoft: palette.info700,
 
-  focusRing: palette.primary500,
-  overlay: 'rgba(16, 22, 20, 0.55)',
+  focusRing: palette.accent500,
+  overlay: 'rgba(18, 41, 31, 0.55)',
 
   // Absolutes, for the camera overlay where the background is the live preview
   // rather than a themed surface.
@@ -111,10 +148,12 @@ export const spacing = {
   giant: 56,
 } as const;
 
+/** Card corners follow the reference's generous 16–18pt. */
 export const radius = {
   sm: 8,
   md: 12,
   lg: 16,
+  card: 18,
   xl: 24,
   pill: 999,
 } as const;
@@ -142,6 +181,38 @@ export const touchTarget = {
   large: 72,
 } as const;
 
+/**
+ * The two reading densities.
+ *
+ * The reference sets the individual parent's phone in larger type with taller
+ * primary actions — 18px body against 16px, a 58px main button — because that
+ * screen is used by the person whose record it is, often the oldest user of the
+ * two. That difference is preserved here as a multiplier rather than a second
+ * type scale, so there is still one scale to change.
+ *
+ * The reference's 16px base is below this file's 17pt floor, so `standard`
+ * keeps 17 and `comfortable` moves to 19. The *relative* emphasis matches; the
+ * absolute floor wins where they disagree.
+ *
+ * This is a display preference attached to an experience, and nothing else. It
+ * does not decide what anybody may read — that is the grant model — and no
+ * screen branches on it for anything but sizing.
+ */
+export type Density = 'standard' | 'comfortable';
+
+export const density = {
+  standard: {
+    /** Multiplier applied to the type scale. */
+    fontScale: 1,
+    /** Minimum height of the screen's primary action. */
+    primaryActionHeight: touchTarget.min,
+  },
+  comfortable: {
+    fontScale: 19 / 17,
+    primaryActionHeight: 58,
+  },
+} as const satisfies Record<Density, { fontScale: number; primaryActionHeight: number }>;
+
 export const elevation = {
   card: {
     shadowColor: palette.neutral900,
@@ -164,9 +235,9 @@ export const avatarColors: readonly string[] = [
   palette.primary600,
   palette.info500,
   palette.accent700,
-  '#6A4C93',
-  '#00695C',
-  '#AD1457',
+  '#5B4380',
+  '#0F5A50',
+  '#8E2159',
 ];
 
 export const theme = {
@@ -176,6 +247,7 @@ export const theme = {
   radius,
   typography,
   touchTarget,
+  density,
   elevation,
   avatarColors,
 } as const;

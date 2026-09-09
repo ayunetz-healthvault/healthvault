@@ -1,6 +1,7 @@
 export {
   avatarColors,
   colors,
+  density,
   elevation,
   palette,
   radius,
@@ -8,5 +9,7 @@ export {
   theme,
   touchTarget,
   typography,
+  type Density,
   type Theme,
 } from './tokens';
+export { contrastRatio } from './contrast';

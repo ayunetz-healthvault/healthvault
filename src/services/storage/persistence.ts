@@ -7,9 +7,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
  * on a weak connection right after a phone call from India. Stores write here
  * immediately and reconcile with DynamoDB later.
  *
- * TODO(security): once real patient data flows through, move this to an
- * encrypted store (SQLCipher via `op-sqlite`, or an app-level envelope key held
- * in SecureStore). AsyncStorage is plaintext on a rooted device.
+ * ## Superseded
+ *
+ * The keys below are the **v1, plaintext** generation. Records no longer live
+ * here: `encryptedStore.ts` writes them encrypted and namespaced by account,
+ * and `migratePlaintextToEncrypted` moves anything still under these names on
+ * first launch after the upgrade.
+ *
+ * The names are kept because the migration needs them, and deleting them would
+ * strand every record written by an earlier build.
  */
 
 export const STORAGE_KEYS = {

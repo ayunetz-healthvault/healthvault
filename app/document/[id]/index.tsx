@@ -19,10 +19,13 @@ import {
 } from '@/components';
 import { AI_SUMMARY_DISCLAIMER } from '@/services/ai/summaryService';
 import { accountService } from '@/services/account/accountService';
+import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocument,
+  selectLiveSchedules,
   selectParent,
   selectSummaryForDocument,
+  selectVisitQuestions,
   useVaultSnapshot,
   useVaultStore,
 } from '@/state/vaultStore';
@@ -32,6 +35,7 @@ import {
   DOCUMENT_CATEGORY_LABELS,
   PROCESSING_STATUS_LABELS,
 } from '@/types/labels';
+import type { ProcessingStatus } from '@/types/domain';
 import { formatDate, formatDateTime } from '@/utils/date';
 import { pluralise } from '@/utils/format';
 
@@ -43,6 +47,71 @@ import { pluralise } from '@/utils/format';
  * first two cards; the findings and medicines are there when they sit down with
  * it properly. The disclaimer sits above the summary, not buried at the bottom.
  */
+/**
+ * What a document with no summary should say, per state.
+ *
+ * There used to be one line here — "This document has not been summarised yet"
+ * — shown for every state including the two where it is false. A report the
+ * pipeline gave up on is not summarised *yet*; it is not going to be, and
+ * telling someone to wait for it means they wait instead of opening the
+ * original or asking the clinic for another copy.
+ *
+ * `offerStatus` is the other half. The status screen starts processing, so
+ * offering it for a document that has finished — failed, or set aside for a
+ * person — invites a pointless re-run of a pipeline that will reach the same
+ * answer.
+ */
+const NO_SUMMARY_STATE: Record<
+  ProcessingStatus,
+  { tone: 'info' | 'warning'; message: string; offerStatus: boolean }
+> = {
+  draft: {
+    tone: 'info',
+    message: 'This document has not been sent for reading yet.',
+    offerStatus: true,
+  },
+  uploading: {
+    tone: 'info',
+    message: 'The pages are still being sent. This can continue in the background.',
+    offerStatus: true,
+  },
+  uploaded: {
+    tone: 'info',
+    message: 'The pages have arrived and are waiting to be read.',
+    offerStatus: true,
+  },
+  processing: {
+    tone: 'info',
+    message: 'This document is being read now. It usually takes a minute or two.',
+    offerStatus: true,
+  },
+  ready: {
+    /**
+     * Ready, and yet there is no summary on this device.
+     *
+     * Either the summary has not been fetched yet or it could not be read. Both
+     * are worth saying plainly rather than showing an empty screen — and
+     * neither is a reason to hide the original.
+     */
+    tone: 'warning',
+    message:
+      'The summary for this document is not on this phone yet. Pull down on the previous screen to fetch it.',
+    offerStatus: false,
+  },
+  failed: {
+    tone: 'warning',
+    message:
+      'This document could not be read, so there is no summary. The pages you added are still here to open.',
+    offerStatus: true,
+  },
+  needs_review: {
+    tone: 'warning',
+    message:
+      'This one needs a person to read it — the pages could not be summarised. Open the original below.',
+    offerStatus: false,
+  },
+};
+
 export default function DocumentSummaryScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -50,6 +119,9 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
 
   const vault = useVaultSnapshot();
   const removeDocument = useVaultStore((state) => state.removeDocument);
+  const addVisitQuestion = useVaultStore((state) => state.addVisitQuestion);
+  const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
+  const selfRecordId = useSessionStore((state) => state.selfRecordId);
 
   const document = id ? selectDocument(vault, id) : undefined;
   const summary = id ? selectSummaryForDocument(vault, id) : undefined;
@@ -63,7 +135,7 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
           title="Document not found"
           message="It may have been deleted."
           actionLabel="Back to home"
-          onAction={() => router.replace('/(tabs)')}
+          onAction={() => router.replace('/')}
         />
       </Screen>
     );
@@ -71,10 +143,25 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
 
   const handleDelete = async (): Promise<void> => {
     setDeleteVisible(false);
-    await accountService.deleteDocument(document.id);
+    await accountService.deleteDocument(document.parentId, document.id);
     removeDocument(document.id);
     router.replace(`/parent/${document.parentId}`);
   };
+
+  /**
+   * Medicines already confirmed, so a row can say so instead of offering the
+   * same confirmation twice.
+   */
+  const scheduledNames = new Set(
+    selectLiveSchedules(vault, document.parentId).map((schedule) =>
+      schedule.name.trim().toLowerCase(),
+    ),
+  );
+
+  /** Suggestions already kept, so a row says so instead of offering twice. */
+  const keptQuestions = new Set(
+    selectVisitQuestions(vault, document.parentId).map((question) => question.text),
+  );
 
   const lowConfidence = summary !== undefined && summary.confidence < 0.7;
   const uncertainties = summary?.uncertainties ?? [];
@@ -89,6 +176,19 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
       testID="document-summary"
       footer={
         <>
+          {/*
+            Offered first, and only when there is a summary to check. The
+            fastest way to catch a misread number is to look at the page.
+          */}
+          {summary ? (
+            <Button
+              label={summary.reviewedAt ? 'Check this again' : 'Check this against the original'}
+              icon="reader-outline"
+              variant="secondary"
+              onPress={() => router.push(`/document/${document.id}/review`)}
+              testID="document-review"
+            />
+          ) : null}
           <Button
             label="Add a follow-up from this"
             icon="calendar-outline"
@@ -124,17 +224,20 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
       {!summary ? (
         <>
           <Callout
-            tone="info"
+            tone={NO_SUMMARY_STATE[document.status].tone}
             title={PROCESSING_STATUS_LABELS[document.status]}
-            message="This document has not been summarised yet."
+            message={NO_SUMMARY_STATE[document.status].message}
+            testID="document-no-summary"
           />
-          <Button
-            label="Check processing status"
-            variant="secondary"
-            onPress={() => router.push(`/document/${document.id}/processing`)}
-            style={styles.statusButton}
-            testID="document-check-status"
-          />
+          {NO_SUMMARY_STATE[document.status].offerStatus ? (
+            <Button
+              label="Check processing status"
+              variant="secondary"
+              onPress={() => router.push(`/document/${document.id}/processing`)}
+              style={styles.statusButton}
+              testID="document-check-status"
+            />
+          ) : null}
         </>
       ) : (
         <>
@@ -224,6 +327,16 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                     <MedicineRow
                       key={medicine.id}
                       medicine={medicine}
+                      alreadyScheduled={scheduledNames.has(medicine.name.trim().toLowerCase())}
+                      onConfirmTaking={() =>
+                        router.push(
+                          `/treatment/new?patientId=${document.parentId}` +
+                            `&documentId=${document.id}` +
+                            `&name=${encodeURIComponent(medicine.name)}` +
+                            `&dosage=${encodeURIComponent(medicine.dosage)}` +
+                            `&frequency=${encodeURIComponent(medicine.frequency)}`,
+                        )
+                      }
                       testID={`medicine-${medicine.id}`}
                     />
                   ))}
@@ -301,6 +414,28 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                         sources={[followUp.source]}
                         testID={`explicit-followup-${index}-source`}
                       />
+                      {/*
+                        Accepting is a separate act. The document asked for
+                        this; nobody has agreed to it, and the button opens a
+                        form rather than creating a task. A proposal that became
+                        a to-do by itself would be the app committing the family
+                        to something a model read off a photograph.
+                      */}
+                      <Button
+                        label="Add this to the list"
+                        variant="secondary"
+                        size="medium"
+                        fullWidth={false}
+                        onPress={() =>
+                          router.push(
+                            `/follow-up/new?parentId=${document.parentId}` +
+                              `&documentId=${document.id}` +
+                              `&title=${encodeURIComponent(followUp.title)}` +
+                              (followUp.date ? `&dueDate=${followUp.date}` : ''),
+                          )
+                        }
+                        testID={`explicit-followup-${index}-accept`}
+                      />
                     </View>
                   </View>
                 ))}
@@ -358,9 +493,39 @@ export default function DocumentSummaryScreen(): React.JSX.Element {
                       color={colors.primary}
                       style={styles.questionIcon}
                     />
-                    <Text variant="callout" style={styles.bulletText}>
-                      {question}
-                    </Text>
+                    <View style={styles.bulletText}>
+                      <Text variant="callout">{question}</Text>
+                      {/*
+                        Keeping is an act, and the origin survives it. A
+                        question kept from a suggestion is still a machine's
+                        question that a person agreed with, and the visit list
+                        says so rather than presenting it as the family's own.
+                      */}
+                      {keptQuestions.has(question) ? (
+                        <Text variant="caption" tone="secondary">
+                          Kept for the next visit.
+                        </Text>
+                      ) : (
+                        <Button
+                          label="Keep this question"
+                          variant="secondary"
+                          size="medium"
+                          fullWidth={false}
+                          onPress={() =>
+                            addVisitQuestion({
+                              patientId: document.parentId,
+                              text: question,
+                              origin: 'accepted_suggestion',
+                              source: { documentId: document.id, page: 1 },
+                              askedBy: userId,
+                              askedBySelf: document.parentId === selfRecordId,
+                              order: index,
+                            })
+                          }
+                          testID={`question-${index}-keep`}
+                        />
+                      )}
+                    </View>
                   </View>
                 ))}
               </Card>

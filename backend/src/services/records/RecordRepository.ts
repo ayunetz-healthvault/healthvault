@@ -89,9 +89,77 @@ export interface ProcessingRecord {
 
 export interface SummaryRecord {
   readonly documentId: string;
+  /**
+   * What the pipeline produced, unchanged, forever.
+   *
+   * Corrections do not edit this. A person saying "the date is 3 September, not
+   * 9 March" is a *second* fact about the document, and losing the first one
+   * means nobody can ever tell whether the model was wrong or the corrector
+   * was. See `corrections`.
+   */
   readonly summary: unknown;
   readonly pipelineVersion: string;
+  /**
+   * The privacy result for the run that produced this summary.
+   *
+   * Stored rather than recomputed because it is a fact about *that* run: how
+   * many identifiers were removed, and whether the leakage check still saw
+   * something. A second device reading this record has to be able to show the
+   * same caveat as the device that uploaded it — a redaction notice that
+   * appears on one phone and not another is worse than none.
+   *
+   * Counts and flags only; the entities themselves are never stored.
+   */
+  readonly privacy?: unknown;
   readonly createdAt: string;
+  /**
+   * Increments when the pipeline produces a new summary for this document.
+   *
+   * A correction does *not* increment it — corrections carry their own
+   * `summaryVersion` and are stated against the version they were made on. A
+   * re-run producing version 2 leaves a version-1 correction visibly stale
+   * rather than silently applying it to different text.
+   */
+  readonly version?: number | undefined;
+  /**
+   * Human corrections, newest last, never rewritten.
+   *
+   * Append-only: an edit to a correction is another correction. "Who said what
+   * about this document, and when" is the question, and an audit trail that can
+   * be edited answers nothing.
+   */
+  readonly corrections?: SummaryCorrection[] | undefined;
+  /**
+   * When a person checked this summary against the original, and who.
+   *
+   * Absent means unchecked. Note what it is *not*: a person confirming the app
+   * read the page correctly is not a clinician validating the content, and no
+   * API response or screen may describe it as one.
+   */
+  readonly reviewedAt?: string | undefined;
+  readonly reviewedBy?: string | undefined;
+  /** The summary version that was reviewed. A newer one is unreviewed again. */
+  readonly reviewedVersion?: number | undefined;
+}
+
+/**
+ * One correction, to one field.
+ *
+ * Deliberately not a diff of the whole summary. A caregiver fixes the date, or
+ * one medicine's dose; recording that as "here is the new summary" makes it
+ * impossible to see what they actually disagreed with.
+ */
+export interface SummaryCorrection {
+  readonly correctionId: string;
+  /** Dotted path into the summary, e.g. `findings.2.value`. */
+  readonly field: string;
+  /** What the model said. Kept so the disagreement is legible. */
+  readonly previousValue: string;
+  readonly correctedValue: string;
+  readonly correctedBy: string;
+  readonly correctedAt: string;
+  /** The summary version this was made against. */
+  readonly summaryVersion: number;
 }
 
 export interface FollowUpRecord {
@@ -99,8 +167,134 @@ export interface FollowUpRecord {
   readonly parentId: string;
   readonly title: string;
   readonly dueDate: string;
+  /** `HH:mm` in the patient's clock, or absent when only the day is known. */
+  readonly dueTime?: string | null | undefined;
   readonly status: string;
+  /**
+   * Where this came from: `manual`, or `document` when a summary suggested it.
+   *
+   * Kept because a task somebody typed and a task accepted from a machine's
+   * reading are different things, and the screen has to be able to say which.
+   * A suggestion that nobody accepted never becomes a record at all.
+   */
   readonly origin: string;
+  readonly kind?: string | undefined;
+  readonly notes?: string | undefined;
+  /** The document that prompted it, when there was one. */
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly doctorCategory?: string | null | undefined;
+  /**
+   * The device calendar event, when the person confirmed writing one.
+   *
+   * Stored so a second device does not offer to create a duplicate. Its
+   * presence is never taken as permission — each device asks before it writes
+   * to a calendar it owns.
+   */
+  readonly calendarEventId?: string | null | undefined;
+  readonly createdAt: string;
+  readonly updatedAt?: string | undefined;
+}
+
+/**
+ * Something a person noticed, in their own words.
+ *
+ * The server stores the words and nothing else. There is no severity, no
+ * triage category, no mapping to a clinical term — the moment this service
+ * assigns weight to "Amma felt dizzy after the new tablet" it is practising
+ * medicine on the strength of a text box, and it would be doing so where
+ * nobody can see it happening. `impact` is the person's answer about their own
+ * day, carried through unchanged.
+ */
+export interface ObservationRecord {
+  readonly observationId: string;
+  readonly parentId: string;
+  /** Exactly what was written. Never normalised, never rewritten. */
+  readonly text: string;
+  /** When it happened, which is not when it was written down. */
+  readonly occurredAt: string;
+  readonly impact: string;
+  readonly recordedBy: string;
+  /** True when the person who wrote it is the patient. */
+  readonly recordedBySelf: boolean;
+  readonly recordedAt: string;
+  /**
+   * Bumped on each edit, so a concurrent change is a conflict rather than a
+   * race. Two family members editing the same note at once is not a rare case
+   * in a record built for two family members.
+   */
+  readonly version: number;
+  readonly updatedAt: string;
+}
+
+/**
+ * A medicine somebody has confirmed they are taking.
+ *
+ * Never created from a document by the pipeline. `confirmedBy` and
+ * `confirmedAt` are required by the type for that reason: a schedule nobody
+ * confirmed is a reading of a prescription, and turning one into reminders to
+ * take a drug is the single worst thing this system could do on its own.
+ *
+ * Superseded rather than edited, so the previous instructions stay readable —
+ * "she was on 5mg until the 3rd" is a question somebody will ask.
+ */
+export interface TreatmentScheduleRecord {
+  readonly scheduleId: string;
+  readonly parentId: string;
+  readonly name: string;
+  readonly dosage: string;
+  /** `HH:mm`, in `timezone`. A list, because "twice a day" is not a clock. */
+  readonly times: string[];
+  /** The patient's zone, not the device's — a daughter abroad sees 8:00 IST. */
+  readonly timezone: string;
+  readonly startDate: string;
+  readonly endDate?: string | null | undefined;
+  readonly provenance: string;
+  readonly sourceDocumentId?: string | null | undefined;
+  readonly confirmedBy: string;
+  readonly confirmedAt: string;
+  /** Set when a newer schedule replaces this one. The row is never deleted. */
+  readonly supersededAt?: string | null | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/**
+ * Something that happened to one dose, at one moment.
+ *
+ * **Append-only, and there is no update or delete for it anywhere in this
+ * service.** Undo adds an event that supersedes the earlier one, because "did
+ * my mother take her tablet this morning" is a question about the record, and
+ * a record that can be quietly rewritten cannot answer it.
+ *
+ * That also makes idempotency trivial: an event is written once, under the id
+ * the device generated, and a retry finds it already there.
+ */
+export interface DoseEventRecord {
+  readonly eventId: string;
+  readonly parentId: string;
+  readonly scheduleId: string;
+  /**
+   * Schedule, date and time of day together: the identity of one dose.
+   *
+   * Two taps on "I've taken it" produce the same occurrence, so the second is
+   * recognised rather than recorded as a second tablet.
+   */
+  readonly occurrenceKey: string;
+  readonly occurrenceAt: string;
+  /** `taken` or `missed`. Never inferred — silence is not a missed dose. */
+  readonly state: string;
+  readonly recordedAt: string;
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+  readonly supersedesEventId?: string | null | undefined;
+  /**
+   * True when this undoes the event it supersedes.
+   *
+   * Marked rather than inferred from the states, so "taken, then corrected to
+   * missed" and "taken, then undone" stay different things. One of them is a
+   * much stronger claim than the other.
+   */
+  readonly undo: boolean;
   readonly createdAt: string;
 }
 

@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, View } from 'react-native';
 
-import { Text } from '../ui';
+import { Button, Text } from '../ui';
 
 import { SourceBadge } from './SourceBadge';
 
@@ -10,6 +10,17 @@ import type { MedicineMention } from '@/types/domain';
 
 export interface MedicineRowProps {
   medicine: MedicineMention;
+  /**
+   * Offers to turn this mention into a schedule.
+   *
+   * Optional, and the wording is deliberate: the action is "somebody is taking
+   * this", not "add to schedule". It opens a confirmation screen — it never
+   * creates anything itself, because a row rendered from a model's reading of a
+   * photograph must not be one tap away from a reminder to take a drug.
+   */
+  onConfirmTaking?: (() => void) | undefined;
+  /** True when a confirmed schedule for this medicine already exists. */
+  alreadyScheduled?: boolean | undefined;
   testID?: string | undefined;
 }
 
@@ -20,7 +31,12 @@ export interface MedicineRowProps {
  * instructions from this app. The screen that renders these says so, and
  * nothing here is phrased as a recommendation.
  */
-export function MedicineRow({ medicine, testID }: MedicineRowProps): React.JSX.Element {
+export function MedicineRow({
+  medicine,
+  onConfirmTaking,
+  alreadyScheduled = false,
+  testID,
+}: MedicineRowProps): React.JSX.Element {
   return (
     <View
       style={styles.row}
@@ -59,6 +75,22 @@ export function MedicineRow({ medicine, testID }: MedicineRowProps): React.JSX.E
         ) : null}
 
         <SourceBadge sources={medicine.sources} testID={testID ? `${testID}-source` : undefined} />
+
+        {onConfirmTaking === undefined ? null : alreadyScheduled ? (
+          <Text variant="caption" tone="secondary">
+            Already on the medicine list.
+          </Text>
+        ) : (
+          <Button
+            label="Someone is taking this"
+            variant="secondary"
+            size="medium"
+            fullWidth={false}
+            onPress={onConfirmTaking}
+            accessibilityHint="Opens a screen to confirm the times. Nothing is scheduled until you do."
+            testID={testID ? `${testID}-confirm` : undefined}
+          />
+        )}
       </View>
     </View>
   );

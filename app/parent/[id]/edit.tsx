@@ -54,7 +54,7 @@ export default function EditParentScreen(): React.JSX.Element {
   const handleDelete = (): void => {
     setDeleteVisible(false);
     removeParent(parent.id);
-    router.replace('/(tabs)');
+    router.replace('/');
   };
 
   return (

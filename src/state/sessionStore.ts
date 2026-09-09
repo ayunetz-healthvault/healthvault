@@ -4,7 +4,10 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 
 import { appLock } from '@/services/auth/appLock';
 import { type AuthSession, authService } from '@/services/auth/authService';
+import { closeVault, openVaultFor } from '@/services/storage/activeVault';
 import { STORAGE_KEYS } from '@/services/storage/persistence';
+import { resetSyncServices } from '@/services/sync/pushService';
+import { closeVaultInMemory, hydrateVaultForAccount } from '@/state/vaultStore';
 import type { AppLockMethod, AuthUser, PrivacySettings } from '@/types/domain';
 import { nowIso } from '@/utils/date';
 
@@ -30,18 +33,58 @@ export const DEFAULT_PRIVACY: PrivacySettings = {
 
 interface SessionState {
   hydrated: boolean;
+  /**
+   * True once the app has *finished trying* to restore a session from secure
+   * storage — whether or not it found one.
+   *
+   * The route guard waits for this. Without it, a cold start on any private
+   * URL is briefly indistinguishable from being signed out: the persisted
+   * store rehydrates first, the guard sees `session === null`, and it sends the
+   * user to sign-in before the token has been read. The session then restores,
+   * the guard bounces off the gate, and the destination is gone.
+   */
+  restoreAttempted: boolean;
   onboardingComplete: boolean;
   user: AuthUser | null;
   session: AuthSession | null;
+  /**
+   * The record this account is the *subject* of, when it has one.
+   *
+   * Null for a helper who has no record of their own. This is what decides
+   * which of the two experiences renders (see `useExperience`), so it is set
+   * from the server's answer about grants — never from a profile field, a
+   * setting or anything the client can assert about itself.
+   *
+   * Until KOO-03 lands there is no grant model to read it from, so it stays
+   * null except where a demonstration build sets it deliberately.
+   */
+  selfRecordId: string | null;
   privacy: PrivacySettings;
   lockState: LockState;
   /** Timestamp the app last went to background, for the auto-lock timer. */
   backgroundedAt: number | null;
 
   setHydrated: () => void;
+  noteRestoreAttempted: () => void;
   completeOnboarding: () => void;
   acceptDisclaimer: () => void;
-  signIn: (session: AuthSession) => void;
+  /**
+   * Records the session and opens that account's encrypted vault.
+   *
+   * Asynchronous because opening the vault reads the device keychain and may
+   * migrate plaintext rows left by an earlier build. Callers await it before
+   * navigating, so the first screen renders against the right records rather
+   * than an empty vault that fills in a moment later.
+   */
+  signIn: (session: AuthSession) => Promise<void>;
+  /**
+   * Records which record this account is the subject of.
+   *
+   * Called with the server's answer once grants are readable. It changes what
+   * renders, never what may be read: every screen still asks the backend, and
+   * the backend still checks grants.
+   */
+  setSelfRecordId: (recordId: string | null) => void;
   signOut: () => Promise<void>;
   updatePrivacy: (patch: Partial<PrivacySettings>) => void;
   setLockMethod: (method: AppLockMethod) => void;
@@ -55,9 +98,11 @@ interface SessionState {
 
 const initialState = {
   hydrated: false,
+  restoreAttempted: false,
   onboardingComplete: false,
   user: null as AuthUser | null,
   session: null as AuthSession | null,
+  selfRecordId: null as string | null,
   privacy: DEFAULT_PRIVACY,
   lockState: 'unknown' as LockState,
   backgroundedAt: null as number | null,
@@ -70,6 +115,8 @@ export const useSessionStore = create<SessionState>()(
 
       setHydrated: () => set({ hydrated: true }),
 
+      noteRestoreAttempted: () => set({ restoreAttempted: true }),
+
       completeOnboarding: () => set({ onboardingComplete: true }),
 
       acceptDisclaimer: () =>
@@ -77,16 +124,49 @@ export const useSessionStore = create<SessionState>()(
           privacy: { ...state.privacy, disclaimerAcceptedAt: nowIso() },
         })),
 
-      signIn: (session) =>
+      signIn: async (session) => {
         set({
           session,
           user: session.user,
           // A fresh sign-in is an unlock; the lock screen would be redundant.
           lockState: 'unlocked',
-        }),
+        });
+
+        // Order matters: the vault has to be pointed at this account before it
+        // is read, or the rehydrate below reads nothing and the screens render
+        // an empty record for somebody who has years of them.
+        await openVaultFor(session.user.id);
+        await hydrateVaultForAccount();
+      },
+
+      setSelfRecordId: (recordId) => set({ selfRecordId: recordId }),
 
       signOut: async () => {
         await authService.signOut();
+
+        /**
+         * The records leave memory, and stay on disk.
+         *
+         * **Detach first, then clear.** The persist middleware writes on every
+         * state change, so emptying the store while it is still attached would
+         * save an empty vault over this account's records — a sign-out that
+         * quietly deletes everything on the device. In this order the clear
+         * writes nowhere.
+         *
+         * What stays is encrypted under a key only this account has, so the
+         * next person to sign in on this phone cannot read it, and this account
+         * signing back in does not have to download everything again.
+         * `forgetAccountLocally` is the destructive form, for deletion.
+         */
+        closeVault();
+        closeVaultInMemory();
+        /**
+         * The cached sync services go too. They hold an account id, and one
+         * left behind would let the next person to sign in on this phone flush
+         * the previous account's queue under their own token.
+         */
+        resetSyncServices();
+
         set({
           ...initialState,
           hydrated: true,
@@ -94,6 +174,9 @@ export const useSessionStore = create<SessionState>()(
           // someone re-read the disclaimer to sign back in is just friction.
           onboardingComplete: get().onboardingComplete,
           privacy: { ...DEFAULT_PRIVACY, disclaimerAcceptedAt: get().privacy.disclaimerAcceptedAt },
+          // Signing out is itself a completed answer about the session; the
+          // guard must not go back to waiting.
+          restoreAttempted: true,
         });
       },
 
@@ -124,7 +207,7 @@ export const useSessionStore = create<SessionState>()(
         return next;
       },
 
-      reset: () => set({ ...initialState, hydrated: true }),
+      reset: () => set({ ...initialState, hydrated: true, restoreAttempted: true }),
     }),
     {
       name: STORAGE_KEYS.session,
@@ -135,6 +218,9 @@ export const useSessionStore = create<SessionState>()(
         onboardingComplete: state.onboardingComplete,
         user: state.user,
         privacy: state.privacy,
+        // Persisted so a cold start renders the right home screen before the
+        // first network round trip, rather than flashing the wrong one.
+        selfRecordId: state.selfRecordId,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHydrated();
@@ -151,17 +237,28 @@ export const shouldShowLockScreen = (state: {
 }): boolean =>
   state.session !== null && state.privacy.lockMethod !== 'none' && state.lockState !== 'unlocked';
 
-/** Restores a session from SecureStore on cold start. */
+/**
+ * Restores a session from SecureStore on cold start.
+ *
+ * Always marks the attempt as finished, including when it throws. A failed
+ * read must not leave the guard waiting forever on a screen that never
+ * appears — "we looked and found nothing" and "we could not look" both mean
+ * the user has to sign in.
+ */
 export const restoreSession = async (): Promise<void> => {
-  const restored = await authService.refresh();
-  if (restored) {
-    const method = await appLock.resolveEffectiveMethod(
-      useSessionStore.getState().privacy.lockMethod,
-    );
-    useSessionStore.setState({
-      session: restored,
-      user: restored.user,
-      lockState: method === 'none' ? 'unlocked' : 'locked',
-    });
+  try {
+    const restored = await authService.refresh();
+    if (restored) {
+      const method = await appLock.resolveEffectiveMethod(
+        useSessionStore.getState().privacy.lockMethod,
+      );
+      useSessionStore.setState({
+        session: restored,
+        user: restored.user,
+        lockState: method === 'none' ? 'unlocked' : 'locked',
+      });
+    }
+  } finally {
+    useSessionStore.getState().noteRestoreAttempted();
   }
 };

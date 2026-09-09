@@ -74,7 +74,14 @@ function AppShell(): React.JSX.Element {
       <Stack.Screen name="onboarding" />
       <Stack.Screen name="(auth)" />
       <Stack.Screen name="lock" options={{ animation: 'fade', gestureEnabled: false }} />
-      <Stack.Screen name="(tabs)" />
+      {/*
+        Two shells, two URL spaces. `index` picks between them from the
+        account's records; nothing in the app can switch between them, because
+        they differ in what may be read and not only in what is drawn.
+      */}
+      <Stack.Screen name="care" />
+      <Stack.Screen name="me" />
+      <Stack.Screen name="schedule" />
     </Stack>
   );
 }

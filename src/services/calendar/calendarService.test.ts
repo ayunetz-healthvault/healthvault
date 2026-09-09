@@ -43,9 +43,15 @@ beforeEach(() => {
 });
 
 describe('buildEventPreview', () => {
-  it('names both the task and the parent in the title', () => {
+  /**
+   * Also inverted by KOO-12. "Review diabetes panel — Lakshmi Iyer" names a
+   * person and their condition in a string that appears on a lock screen.
+   */
+  it('keeps the task title out of the event, because it can name a condition', () => {
     const preview = calendarService.buildEventPreview(followUp, parent);
-    expect(preview.title).toBe('Review diabetes panel — Lakshmi Iyer');
+
+    expect(preview.title).not.toContain('diabetes');
+    expect(preview.title).toBe('Appointment');
   });
 
   it('honours the follow-up time', () => {
@@ -64,16 +70,45 @@ describe('buildEventPreview', () => {
     expect(calendarService.buildEventPreview(followUp, parent).reminderMinutes).toBe(24 * 60);
   });
 
-  it('carries the notes, the doctor and an attribution into the event body', () => {
+  /**
+   * These three used to assert the opposite — that the parent's full name went
+   * in the title and their doctor and the follow-up's notes went in the body.
+   * That was wrong, and KOO-12 says so: a calendar event shows on a lock
+   * screen, syncs wherever the user's calendar syncs, and is visible to anybody
+   * they share a calendar with. A doctor's name is a specialty and a specialty
+   * is close enough to a diagnosis.
+   */
+  it('writes almost nothing by default', () => {
     const preview = calendarService.buildEventPreview(followUp, parent);
-    expect(preview.notes).toContain('Carry the July lab report.');
-    expect(preview.notes).toContain('Dr. Meera Krishnan');
+
+    expect(preview.title).toBe('Appointment');
     expect(preview.notes).toContain('Ayunetz');
+    expect(preview.location).toBe('');
+  });
+
+  it('never carries the record into the event, at any detail level', () => {
+    for (const detail of ['minimal', 'standard'] as const) {
+      const preview = calendarService.buildEventPreview(followUp, parent, detail);
+      const written = `${preview.title}|${preview.notes}|${preview.location}`;
+
+      // The doctor, the follow-up's own notes, and the parent's full name.
+      expect(written).not.toContain('Meera Krishnan');
+      expect(written).not.toContain('Carry the July lab report');
+      expect(written).not.toContain(parent.fullName);
+    }
+  });
+
+  it('adds only a first name and the kind of appointment at the higher level', () => {
+    const preview = calendarService.buildEventPreview(followUp, parent, 'standard');
+
+    expect(preview.title).toContain(parent.fullName.split(' ')[0] as string);
+    expect(preview.title).not.toContain(parent.fullName);
   });
 
   it('copes with a missing parent', () => {
     const preview = calendarService.buildEventPreview(followUp, undefined);
-    expect(preview.title).toContain('your parent');
+
+    expect(preview.title).toBe('Appointment');
     expect(preview.location).toBe('');
   });
 
@@ -87,7 +122,15 @@ describe('addFollowUpToCalendar', () => {
   it('creates the event and reports which calendar it landed in', async () => {
     const result = await calendarService.addFollowUpToCalendar(followUp, parent);
 
-    expect(result).toEqual({ status: 'created', eventId: 'event-1', calendarTitle: 'Personal' });
+    // The calendar id as well as its title: the device mapping records where
+    // the event went, and an event id alone does not say on a phone with more
+    // than one calendar.
+    expect(result).toEqual({
+      status: 'created',
+      eventId: 'event-1',
+      calendarId: 'cal-1',
+      calendarTitle: 'Personal',
+    });
     expect(Calendar.createEventAsync).toHaveBeenCalledTimes(1);
   });
 

@@ -32,7 +32,16 @@ export function Badge({ label, tone = 'neutral', icon, testID }: BadgeProps): Re
   return (
     <View style={[styles.badge, { backgroundColor: background }]} testID={testID}>
       {icon ? <Ionicons name={icon} size={14} color={foreground} /> : null}
-      <Text variant="caption" style={[styles.label, { color: foreground }]} numberOfLines={1}>
+      {/*
+        Wraps rather than truncating.
+
+        `numberOfLines={1}` cut "Demonstration — these records are fictional"
+        to "...are fictio" on a 360pt phone at the comfortable density, which
+        turned the one label that has to be readable into a clipped fragment.
+        A badge that is two lines tall is fine; a badge that hides half of what
+        it says is not.
+      */}
+      <Text variant="caption" style={[styles.label, { color: foreground }]}>
         {label}
       </Text>
     </View>
@@ -43,11 +52,13 @@ const styles = StyleSheet.create({
   badge: {
     alignItems: 'center',
     alignSelf: 'flex-start',
+    // Never wider than the space it is given, however long the label is.
+    maxWidth: '100%',
     borderRadius: radius.pill,
     flexDirection: 'row',
     gap: spacing.xs,
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs + 1,
   },
-  label: { fontWeight: '600' },
+  label: { flexShrink: 1, fontWeight: '600' },
 });

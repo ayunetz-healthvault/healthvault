@@ -1,6 +1,8 @@
 import * as DocumentPicker from 'expo-document-picker';
 import * as ImagePicker from 'expo-image-picker';
 
+import { keepOriginal, ProtectedStorageFull } from '@/services/storage/protectedFiles';
+
 import { config } from '@/config/env';
 import type { CaptureSource, DocumentKind, DocumentPage } from '@/types/domain';
 import { nowIso } from '@/utils/date';
@@ -60,6 +62,35 @@ export const buildPage = (input: {
 /** Rejects anything past the presigned-upload ceiling before the user waits on it. */
 export const exceedsSizeLimit = (sizeBytes: number): boolean =>
   sizeBytes > config.upload.maxUploadBytes;
+
+/**
+ * Moves captured pages out of the picker's cache.
+ *
+ * The pickers copy what the user chose into the **cache** directory, which the
+ * operating system empties whenever it wants space and without asking. A parent
+ * who photographs a discharge summary, loses signal, and opens the app the next
+ * morning would find the pages gone and the record still saying an upload was
+ * pending.
+ *
+ * Called as soon as pages are captured rather than at upload time, because the
+ * gap between the two is exactly where the cache gets cleared.
+ *
+ * A page that cannot be moved is kept as it was: the cache copy still works for
+ * the next few minutes, and losing the page outright to a failed copy would be
+ * worse than leaving it somewhere fragile.
+ */
+export const protectPages = (accountId: string, pages: DocumentPage[]): DocumentPage[] =>
+  pages.map((page) => {
+    try {
+      const stored = keepOriginal(accountId, page.uri, `${page.id}-${page.fileName}`);
+      return { ...page, uri: stored.uri, sizeBytes: stored.sizeBytes || page.sizeBytes };
+    } catch (error) {
+      // `ProtectedStorageFull` reaches the caller so capture can say why; any
+      // other failure leaves the page on its cache URI rather than dropping it.
+      if (error instanceof ProtectedStorageFull) throw error;
+      return page;
+    }
+  });
 
 export const captureService = {
   /** Wraps a photo taken by the in-app scanner camera. */

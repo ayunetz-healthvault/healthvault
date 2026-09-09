@@ -43,13 +43,25 @@ jest.mock('expo-local-authentication', () => ({
   AuthenticationType: { FINGERPRINT: 1, FACIAL_RECOGNITION: 2, IRIS: 3 },
 }));
 
-jest.mock('expo-crypto', () => ({
-  digestStringAsync: jest.fn(async (_algo: string, value: string) => `digest:${value}`),
-  getRandomBytesAsync: jest.fn(async (n: number) => new Uint8Array(n).fill(7)),
-  randomUUID: jest.fn(() => '00000000-0000-4000-8000-000000000000'),
-  CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
-  CryptoEncoding: { HEX: 'hex' },
-}));
+jest.mock('expo-crypto', () => {
+  // Real randomness, from Node's CSPRNG.
+  //
+  // A fixed fill was fine while nothing depended on the bytes, but record
+  // encryption does: with a constant nonce every envelope for the same
+  // plaintext would be identical, and a test asserting otherwise would pass
+  // only because the fake was lying. Anything that needs determinism should
+  // stub this per-test rather than have it be deterministic for everyone.
+  const { randomBytes } = require('node:crypto') as typeof import('node:crypto');
+
+  return {
+    digestStringAsync: jest.fn(async (_algo: string, value: string) => `digest:${value}`),
+    getRandomBytes: jest.fn((n: number) => new Uint8Array(randomBytes(n))),
+    getRandomBytesAsync: jest.fn(async (n: number) => new Uint8Array(randomBytes(n))),
+    randomUUID: jest.fn(() => '00000000-0000-4000-8000-000000000000'),
+    CryptoDigestAlgorithm: { SHA256: 'SHA-256' },
+    CryptoEncoding: { HEX: 'hex' },
+  };
+});
 
 jest.mock('expo-calendar', () => ({
   requestCalendarPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
