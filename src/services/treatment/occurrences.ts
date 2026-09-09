@@ -93,16 +93,34 @@ export const occurrencesForDay = (
   localDate: string,
 ): DoseOccurrence[] => {
   /**
-   * Newest event per occurrence.
+   * Which events something later has replaced.
    *
-   * `recordedAt` orders them, and the id breaks a tie — two events in the same
-   * millisecond is unlikely, but a comparison returning zero would make the
-   * result depend on array order, which is not a decision anybody made.
+   * This, rather than the clock, is what decides which event is current. An
+   * event that supersedes another *is* the later one by construction, whatever
+   * the two timestamps say — and the timestamps can say nothing useful: tapping
+   * "taken" and then "undo" straight away puts both in the same millisecond,
+   * and the tie-break was the id, whose suffix is random. Half the time the
+   * undo lost, the dose stayed marked taken, and the person who had just
+   * corrected it watched their correction disappear.
+   */
+  const superseded = new Set(
+    events.flatMap((event) =>
+      event.supersedesEventId === null ? [] : [event.supersedesEventId],
+    ),
+  );
+
+  /**
+   * Newest event per occurrence, among the ones nothing has replaced.
+   *
+   * `recordedAt` still orders what remains — an occurrence answered twice with
+   * no chain between the answers is possible in an old record — and the id
+   * still breaks a tie, because a comparison returning zero would leave the
+   * result depending on array order, which is not a decision anybody made.
    */
   const latest = new Map<string, DoseEvent>();
-  for (const event of [...events].sort(
-    (a, b) => a.recordedAt.localeCompare(b.recordedAt) || a.id.localeCompare(b.id),
-  )) {
+  for (const event of [...events]
+    .filter((event) => !superseded.has(event.id))
+    .sort((a, b) => a.recordedAt.localeCompare(b.recordedAt) || a.id.localeCompare(b.id))) {
     latest.set(event.occurrenceKey, event);
   }
 

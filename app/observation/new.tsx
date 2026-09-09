@@ -10,6 +10,7 @@ import {
   SectionHeader,
   TextField,
 } from '@/components';
+import { pushObservation } from '@/services/sync/dailyCare';
 import { useSessionStore } from '@/state/sessionStore';
 import { selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { IMPACT_LABELS, type ObservationImpact } from '@/types/observations';
@@ -72,7 +73,7 @@ export default function NewObservationScreen(): React.JSX.Element {
     setErrors(found);
     if (found.text !== undefined || found.occurredOn !== undefined) return;
 
-    addObservation({
+    const saved = addObservation({
       patientId: parent.id,
       text,
       /**
@@ -87,6 +88,13 @@ export default function NewObservationScreen(): React.JSX.Element {
       recordedBy: user?.id ?? 'usr_local',
       recordedBySelf: parent.id === selfRecordId,
     });
+
+    /**
+     * Queued, then sent. The note is already on this phone either way — a
+     * caregiver writing it in a waiting room with no signal has still written
+     * it — and this is what carries it to whoever reads the record next.
+     */
+    void pushObservation(saved);
 
     router.back();
   };

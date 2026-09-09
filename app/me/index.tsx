@@ -17,6 +17,7 @@ import {
 import { useExperience } from '@/services/experience';
 import { nextDueDose, recordDose, undoDose } from '@/services/treatment/occurrences';
 import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { pushDoseEvent } from '@/services/sync/dailyCare';
 import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDosesForDay,
@@ -107,20 +108,22 @@ export default function ParentTodayScreen(): React.JSX.Element {
    * tap cannot produce two entries for one tablet.
    */
   const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
-    appendDoseEvent(
-      recordDose({
-        occurrence,
-        state,
-        recordedBy: user?.id ?? 'usr_local',
-        // This is the patient's own screen, so it is their own confirmation.
-        recordedBySelf: true,
-      }),
-    );
+    const recorded = recordDose({
+      occurrence,
+      state,
+      recordedBy: user?.id ?? 'usr_local',
+      // This is the patient's own screen, so it is their own confirmation.
+      recordedBySelf: true,
+    });
+    // Sent only if the store actually recorded it: a duplicate tap writes
+    // nothing here, and must put nothing on anybody else's phone either.
+    void pushDoseEvent(appendDoseEvent(recorded));
     setJustAnsweredKey(occurrence.occurrenceKey);
   };
 
   const undoFor = (occurrence: DoseOccurrence): void => {
-    appendDoseEvent(undoDose(occurrence, user?.id ?? 'usr_local', true));
+    const undone = undoDose(occurrence, user?.id ?? 'usr_local', true);
+    void pushDoseEvent(appendDoseEvent(undone));
     setJustAnsweredKey(null);
   };
 

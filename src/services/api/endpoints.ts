@@ -90,6 +90,37 @@ export const endpoints = {
       `/v1/patients/${patientId}/follow-ups/${followUpId}`,
   },
 
+  /**
+   * What a person noticed, what they are taking, and whether they took it.
+   *
+   * Shared for the same reason follow-ups are: a note written by whoever was
+   * there, read by whoever comes next. A dose event has a create and nothing
+   * else — no update, no delete — because the record is append-only on the
+   * server too, and undoing a tap appends rather than erases.
+   */
+  observations: {
+    list: (patientId: string) => `/v1/patients/${patientId}/observations`,
+    create: (patientId: string) => `/v1/patients/${patientId}/observations`,
+    update: (patientId: string, observationId: string) =>
+      `/v1/patients/${patientId}/observations/${observationId}`,
+    remove: (patientId: string, observationId: string) =>
+      `/v1/patients/${patientId}/observations/${observationId}`,
+  },
+
+  treatments: {
+    list: (patientId: string) => `/v1/patients/${patientId}/treatments`,
+    /** Confirming a medicine. There is no way to create one without that. */
+    confirm: (patientId: string) => `/v1/patients/${patientId}/treatments`,
+    /** Stopping one. The only edit there is; the old times stay readable. */
+    supersede: (patientId: string, scheduleId: string) =>
+      `/v1/patients/${patientId}/treatments/${scheduleId}/supersede`,
+  },
+
+  doseEvents: {
+    list: (patientId: string) => `/v1/patients/${patientId}/dose-events`,
+    append: (patientId: string) => `/v1/patients/${patientId}/dose-events`,
+  },
+
   // --- Processing (SQS -> worker -> summary provider -> DynamoDB) -----------
   processing: {
     /** Poll target for the processing screen. */

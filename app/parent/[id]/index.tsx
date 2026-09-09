@@ -20,6 +20,7 @@ import {
 import { useVaultRefresh } from '@/hooks/useVaultRefresh';
 import { recordDose, undoDose } from '@/services/treatment/occurrences';
 import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { pushDoseEvent } from '@/services/sync/dailyCare';
 import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocumentTimeline,
@@ -71,14 +72,26 @@ export default function ParentProfileScreen(): React.JSX.Element {
   const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
   const doses = selectDosesForDay(vault, parent.id, localDateIn(timezone));
 
+  /**
+   * Recorded here, and sent. A dose is the fact the other person most needs —
+   * it is what stops two people giving the same tablet twice.
+   */
   const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
-    appendDoseEvent(
-      recordDose({ occurrence, state, recordedBy: userId, recordedBySelf: false }),
-    );
+    const recorded = recordDose({
+      occurrence,
+      state,
+      recordedBy: userId,
+      recordedBySelf: false,
+    });
+    // Sent only if the store actually recorded it: a duplicate tap writes
+    // nothing here, and must put nothing on anybody else's phone either.
+    void pushDoseEvent(appendDoseEvent(recorded));
   };
 
   const undoFor = (occurrence: DoseOccurrence): void => {
-    appendDoseEvent(undoDose(occurrence, userId, false));
+    // An undo is another event, not a deletion — so it is sent like any other.
+    const undone = undoDose(occurrence, userId, false);
+    void pushDoseEvent(appendDoseEvent(undone));
   };
 
   const documents = selectDocumentTimeline(vault, parent.id);

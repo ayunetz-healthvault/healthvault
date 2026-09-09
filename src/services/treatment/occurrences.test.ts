@@ -280,6 +280,40 @@ describe('undoing', () => {
     (o) => o.occurrenceKey === morningKey,
   );
 
+  /**
+   * The case the clock cannot decide.
+   *
+   * Tapping "taken" and then "undo" straight away puts both events in the same
+   * millisecond. Ordering by time then left the id to break the tie, and the
+   * id's suffix is random — so half the time the undo lost, the dose stayed
+   * marked taken, and the person watched their correction vanish. The
+   * supersedes chain says which came second, and it does not depend on a clock
+   * having sub-millisecond resolution.
+   */
+  it('takes effect even when it lands in the same millisecond', () => {
+    const sameInstant = new Date('2026-09-08T02:35:00.000Z');
+    const immediate = undoDose(recorded!, 'acc_meera', true, sameInstant) as DoseEvent;
+
+    const after = occurrencesForDay([schedule()], [taken, immediate], '2026-09-08').find(
+      (o) => o.occurrenceKey === morningKey,
+    );
+
+    expect(after?.state).toBeNull();
+    expect(immediate.recordedAt).toBe(taken.recordedAt);
+  });
+
+  /** And the order the events arrive in does not change the answer either. */
+  it('takes effect whichever order the events are read in', () => {
+    const sameInstant = new Date('2026-09-08T02:35:00.000Z');
+    const immediate = undoDose(recorded!, 'acc_meera', true, sameInstant) as DoseEvent;
+
+    const reversed = occurrencesForDay([schedule()], [immediate, taken], '2026-09-08').find(
+      (o) => o.occurrenceKey === morningKey,
+    );
+
+    expect(reversed?.state).toBeNull();
+  });
+
   it('returns the dose to not recorded', () => {
     const undone = undoDose(
       recorded!,

@@ -20,6 +20,7 @@ import {
   withTime,
   type ScheduleDraftErrors,
 } from '@/services/treatment/scheduleDraft';
+import { pushTreatment } from '@/services/sync/dailyCare';
 import { useSessionStore } from '@/state/sessionStore';
 import { selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { spacing } from '@/theme';
@@ -93,7 +94,7 @@ export default function ConfirmMedicineScreen(): React.JSX.Element {
     setErrors(found);
     if (Object.values(found).some((message) => message !== undefined)) return;
 
-    confirmSchedule({
+    const confirmed = confirmSchedule({
       patientId: parent.id,
       name: name.trim(),
       dosage: dosage.trim(),
@@ -106,6 +107,11 @@ export default function ConfirmMedicineScreen(): React.JSX.Element {
       source: params.documentId ? { documentId: params.documentId, page: 1 } : null,
       confirmedBy: user?.id ?? 'usr_local',
     });
+
+    // Shared, because the other person needs to know what she is taking — and
+    // the confirmation travels with it, since that is what makes it a
+    // medicine rather than a line somebody read on a prescription.
+    void pushTreatment(confirmed);
 
     router.back();
   };

@@ -219,8 +219,15 @@ interface VaultState {
   confirmSchedule: (draft: ScheduleConfirmation) => TreatmentSchedule;
   /** Stops a schedule without deleting it. */
   supersedeSchedule: (scheduleId: string) => void;
-  /** Records a dose event. Ignores null, which is what a no-op tap produces. */
-  appendDoseEvent: (event: DoseEvent | null) => void;
+  /**
+   * Records a dose event, and says what it actually recorded.
+   *
+   * Returns null when nothing was written — a null argument, or a second tap
+   * that says what the record already says. Callers use the answer to decide
+   * what to send: queueing an event the store rejected would put a dose on
+   * everybody else's phone that does not exist on this one.
+   */
+  appendDoseEvent: (event: DoseEvent | null) => DoseEvent | null;
 
   // --- Observations and questions -------------------------------------------
   addObservation: (draft: ObservationDraft) => Observation;
@@ -564,15 +571,62 @@ export const useVaultStore = create<VaultState>()(
         })),
 
       /**
-       * Null is accepted and ignored.
+       * Null is accepted and ignored — and so is a duplicate.
        *
-       * `recordDose` returns null when the tap would change nothing — the same
-       * dose already in the same state. Handling that here means no screen has
-       * to remember to check, which is how a double tap becomes two entries for
-       * one tablet.
+       * `recordDose` returns null when the tap would change nothing, and
+       * handling that here means no screen has to remember to check. What that
+       * alone does not cover is two taps in the same instant: both handlers
+       * read the same occurrence, both see "not recorded", and both produce a
+       * real event. The screen cannot tell, because it is looking at a snapshot
+       * taken before either tap.
+       *
+       * This is the only place that can. `set` sees the current list, so a
+       * second event that merely repeats what the live one already says is
+       * dropped — one tablet, one event, however fast somebody presses.
+       *
+       * An undo and a correction both pass: an undo names the event it
+       * supersedes, and a correction carries a different state. Those are
+       * people changing their minds, which the record is supposed to keep.
        */
-      appendDoseEvent: (event) =>
-        set((state) => (event === null ? state : { doseEvents: [...state.doseEvents, event] })),
+      appendDoseEvent: (event) => {
+        if (event === null) return null;
+
+        let appended: DoseEvent | null = null;
+
+        set((state) => {
+          const superseded = new Set(
+            state.doseEvents.flatMap((entry) =>
+              entry.supersedesEventId === null ? [] : [entry.supersedesEventId],
+            ),
+          );
+          const live = state.doseEvents
+            .filter(
+              (entry) => entry.occurrenceKey === event.occurrenceKey && !superseded.has(entry.id),
+            )
+            .at(-1);
+
+          /**
+           * An undo carries the state it undid — "taken, then that was undone"
+           * rather than "taken, then missed", which would be a much stronger
+           * claim. So a live event that *is* an undo means the dose is not
+           * recorded, and answering it again is a new answer rather than a
+           * repeat of an old one.
+           */
+          const repeats =
+            live !== undefined &&
+            !live.undo &&
+            live.state === event.state &&
+            event.supersedesEventId === null &&
+            !event.undo;
+
+          if (repeats) return state;
+
+          appended = event;
+          return { doseEvents: [...state.doseEvents, event] };
+        });
+
+        return appended;
+      },
 
       addObservation: (draft) => {
         const timestamp = nowIso();

@@ -15,6 +15,7 @@ import {
 import { useExperience } from '@/services/experience';
 import { recordDose, undoDose } from '@/services/treatment/occurrences';
 import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { pushDoseEvent } from '@/services/sync/dailyCare';
 import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocumentTimeline,
@@ -77,19 +78,21 @@ export default function ParentHealthScreen(): React.JSX.Element {
   const observations = selectObservations(vault, record.id);
 
   const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
-    appendDoseEvent(
-      recordDose({
-        occurrence,
-        state,
-        recordedBy: userId,
-        // The patient's own screen, so this is their own confirmation.
-        recordedBySelf: true,
-      }),
-    );
+    const recorded = recordDose({
+      occurrence,
+      state,
+      recordedBy: userId,
+      // The patient's own screen, so this is their own confirmation.
+      recordedBySelf: true,
+    });
+    // Sent only if the store actually recorded it: a duplicate tap writes
+    // nothing here, and must put nothing on anybody else's phone either.
+    void pushDoseEvent(appendDoseEvent(recorded));
   };
 
   const undoFor = (occurrence: DoseOccurrence): void => {
-    appendDoseEvent(undoDose(occurrence, userId, true));
+    const undone = undoDose(occurrence, userId, true);
+    void pushDoseEvent(appendDoseEvent(undone));
   };
 
   return (

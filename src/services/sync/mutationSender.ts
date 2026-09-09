@@ -31,17 +31,20 @@ export const sendMutation = async (mutation: Mutation): Promise<void> => {
   switch (mutation.entity) {
     case 'follow_up':
       return sendFollowUp(mutation);
+    case 'observation':
+      return sendObservation(mutation);
+    case 'treatment':
+      return sendTreatment(mutation);
+    case 'dose_event':
+      return sendDoseEvent(mutation);
     /**
-     * Deliberately not sent yet. Documents have their own upload path, and
-     * patients, observations, treatments and dose events have no `/v1`
-     * endpoint — so nothing enqueues them, and a mutation that reached here
-     * would be a bug rather than a network problem.
+     * Still deliberately not sent. Documents have their own upload path, and a
+     * patient profile has no write endpoint beyond the one that creates it — so
+     * nothing enqueues either, and a mutation that reached here would be a bug
+     * rather than a network problem.
      */
     case 'patient':
     case 'document':
-    case 'observation':
-    case 'treatment':
-    case 'dose_event':
     default:
       throw unsupported(mutation);
   }
@@ -65,6 +68,94 @@ export const sendMutation = async (mutation: Mutation): Promise<void> => {
  * exists rather than a second copy of Thursday's appointment. This is the same
  * argument as `Mutation.id` one level up, applied to the record itself.
  */
+/**
+ * A note somebody wrote, sent under the id this device gave it.
+ *
+ * Same identity rule as a follow-up, and the same reason: the note is written
+ * on a phone that may not reach the server for hours, so the device's id is the
+ * id, a retry of a lost response returns the note rather than a second copy of
+ * it, and every later edit lands on the same row.
+ *
+ * An update carries the version it was made against. The server refuses a stale
+ * one with a 409, which `classify` turns into a conflict a person resolves —
+ * never a silent overwrite of what the other family member wrote.
+ */
+const sendObservation = async (mutation: Mutation): Promise<void> => {
+  const { patientId, entityId, operation, payload, baseVersion } = mutation;
+
+  if (operation === 'delete') {
+    await apiClient.delete(endpoints.observations.remove(patientId, entityId));
+    return;
+  }
+
+  if (operation === 'update') {
+    await apiClient.patch(endpoints.observations.update(patientId, entityId), {
+      ...asObject(payload),
+      version: baseVersion ?? 1,
+    });
+    return;
+  }
+
+  await apiClient.post(endpoints.observations.create(patientId), {
+    ...asObject(payload),
+    observationId: entityId,
+  });
+};
+
+/**
+ * A medicine somebody confirmed, or the moment they stopped it.
+ *
+ * There is no general update: changing what somebody takes produces a new
+ * schedule, because what they were taking before is part of the record. So an
+ * `update` here means exactly one thing — this schedule has ended — and it is
+ * sent to the endpoint that says so.
+ */
+const sendTreatment = async (mutation: Mutation): Promise<void> => {
+  const { patientId, entityId, operation, payload } = mutation;
+
+  if (operation === 'update') {
+    await apiClient.post(endpoints.treatments.supersede(patientId, entityId), asObject(payload));
+    return;
+  }
+
+  if (operation === 'delete') {
+    /**
+     * There is no delete. A medicine somebody was taking is not something the
+     * record can forget, and an endpoint that pretended otherwise would be
+     * worse than this refusal — which reaches the user as "saved on this
+     * phone" rather than as an eternal retry.
+     */
+    throw unsupported(mutation);
+  }
+
+  await apiClient.post(endpoints.treatments.confirm(patientId), {
+    ...asObject(payload),
+    scheduleId: entityId,
+  });
+};
+
+/**
+ * One dose, appended.
+ *
+ * Create only, on both sides. Undo is another create that supersedes this one,
+ * so there is no update to send and no delete to send: the id makes the append
+ * idempotent, and two taps on one tablet stay one event.
+ */
+const sendDoseEvent = async (mutation: Mutation): Promise<void> => {
+  const { patientId, entityId, operation, payload } = mutation;
+
+  if (operation !== 'create') throw unsupported(mutation);
+
+  await apiClient.post(endpoints.doseEvents.append(patientId), {
+    ...asObject(payload),
+    eventId: entityId,
+  });
+};
+
+/** A payload as an object, or an empty one. Never a silent `undefined` spread. */
+const asObject = (payload: unknown): Record<string, unknown> =>
+  payload !== null && typeof payload === 'object' ? (payload as Record<string, unknown>) : {};
+
 const sendFollowUp = async (mutation: Mutation): Promise<void> => {
   const { patientId, entityId, operation, payload } = mutation;
 
@@ -78,10 +169,7 @@ const sendFollowUp = async (mutation: Mutation): Promise<void> => {
     return;
   }
 
-  const body =
-    payload !== null && typeof payload === 'object'
-      ? { ...(payload as Record<string, unknown>), followUpId: entityId }
-      : { followUpId: entityId };
+  const body = { ...asObject(payload), followUpId: entityId };
 
   const { followUp } = await apiClient.post<{ followUp: { followUpId: string } }>(
     endpoints.followUps.create(patientId),

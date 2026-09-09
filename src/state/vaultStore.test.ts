@@ -11,6 +11,7 @@ import {
 } from './vaultStore';
 
 import type { ParentDraft } from '@/types/domain';
+import type { DoseEvent } from '@/types/treatment';
 import { isoToday } from '@/utils/date';
 
 const draft = (overrides: Partial<ParentDraft> = {}): ParentDraft => ({
@@ -494,5 +495,89 @@ describe('resetDemoData', () => {
     const names = useVaultStore.getState().parents.map((parent) => parent.fullName);
     expect(names).not.toContain('Added During The Demo');
     expect(names.length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * Two taps on one tablet, in the same instant.
+ *
+ * `recordDose` refuses to produce an event when the occurrence already says
+ * what the tap says — but both handlers of a fast double tap read the same
+ * occurrence, taken before either of them ran, and both produce a real event.
+ * The screen cannot see that; it is looking at a snapshot. The store can, and
+ * this is where one tablet stays one event.
+ */
+describe('recording the same dose twice', () => {
+  const doseEvent = (id: string, patch: Partial<DoseEvent> = {}): DoseEvent => ({
+    id,
+    patientId: 'par_1',
+    scheduleId: 'trt_1',
+    occurrenceKey: 'trt_1#2026-09-09#08:00',
+    occurrenceAt: '2026-09-09T02:30:00.000Z',
+    state: 'taken',
+    recordedAt: '2026-09-09T03:00:00.000Z',
+    recordedBy: 'usr_1',
+    recordedBySelf: true,
+    supersedesEventId: null,
+    undo: false,
+    createdAt: '2026-09-09T03:00:00.000Z',
+    ...patch,
+  });
+
+  it('keeps one event when the second says exactly what the first did', () => {
+    const first = useVaultStore.getState().appendDoseEvent(doseEvent('dse_1'));
+    const second = useVaultStore.getState().appendDoseEvent(doseEvent('dse_2'));
+
+    expect(first).not.toBeNull();
+    // Null, so the caller knows there is nothing to send either.
+    expect(second).toBeNull();
+    expect(useVaultStore.getState().doseEvents).toHaveLength(1);
+  });
+
+  /** Changing your mind is not a duplicate, and the record keeps both. */
+  it('records a correction to the other answer', () => {
+    useVaultStore.getState().appendDoseEvent(doseEvent('dse_1'));
+    const corrected = useVaultStore
+      .getState()
+      .appendDoseEvent(doseEvent('dse_2', { state: 'missed', supersedesEventId: 'dse_1' }));
+
+    expect(corrected).not.toBeNull();
+    expect(useVaultStore.getState().doseEvents).toHaveLength(2);
+  });
+
+  it('records an undo, which is also not a duplicate', () => {
+    useVaultStore.getState().appendDoseEvent(doseEvent('dse_1'));
+    const undone = useVaultStore
+      .getState()
+      .appendDoseEvent(doseEvent('dse_2', { supersedesEventId: 'dse_1', undo: true }));
+
+    expect(undone).not.toBeNull();
+    expect(useVaultStore.getState().doseEvents).toHaveLength(2);
+  });
+
+  /**
+   * And after an undo the slot is answerable again: the earlier event is
+   * superseded, so it is not what the record "already says".
+   */
+  it('lets the dose be recorded again after an undo', () => {
+    useVaultStore.getState().appendDoseEvent(doseEvent('dse_1'));
+    useVaultStore
+      .getState()
+      .appendDoseEvent(doseEvent('dse_2', { supersedesEventId: 'dse_1', undo: true }));
+
+    const again = useVaultStore.getState().appendDoseEvent(doseEvent('dse_3'));
+
+    expect(again).not.toBeNull();
+    expect(useVaultStore.getState().doseEvents).toHaveLength(3);
+  });
+
+  it('leaves a different dose alone', () => {
+    useVaultStore.getState().appendDoseEvent(doseEvent('dse_1'));
+    const evening = useVaultStore
+      .getState()
+      .appendDoseEvent(doseEvent('dse_2', { occurrenceKey: 'trt_1#2026-09-09#20:00' }));
+
+    expect(evening).not.toBeNull();
+    expect(useVaultStore.getState().doseEvents).toHaveLength(2);
   });
 });

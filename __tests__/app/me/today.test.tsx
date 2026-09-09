@@ -24,6 +24,14 @@ const METRICS = {
   insets: { top: 47, left: 0, right: 0, bottom: 34 },
 };
 
+/** What the screen queued for the shared record, if anything. */
+const mockPushDoseEvent = jest.fn();
+
+jest.mock('@/services/sync/dailyCare', () => ({
+  ...jest.requireActual('@/services/sync/dailyCare'),
+  pushDoseEvent: (...args: unknown[]) => mockPushDoseEvent(...args),
+}));
+
 /** Awaited: React 19 flushes the tree asynchronously. See the care home test. */
 const renderScreen = async (): Promise<void> => {
   await render(
@@ -187,6 +195,7 @@ describe('parent Today', () => {
  */
 describe('parent Today with a confirmed medicine', () => {
   beforeEach(() => {
+    mockPushDoseEvent.mockReset();
     useVaultStore.setState({ schedules: [schedule(['08:00', '20:00'])] });
   });
 
@@ -264,5 +273,66 @@ describe('parent Today with a confirmed medicine', () => {
 
     // Back to an unanswered dose, which is the point of undo.
     expect(await screen.findByTestId('me-today-dose-taken')).toBeTruthy();
+  });
+});
+
+/**
+ * A dose reaching the rest of the family.
+ *
+ * The screen recorded doses perfectly and shared them with nobody: they were
+ * written to an encrypted store on one phone, and `mutationSender` refused
+ * them because no endpoint existed. A dose is the fact a second carer most
+ * needs — it is what stops two people giving the same tablet twice — so
+ * recording one and queueing it are one action, and the queueing is what these
+ * assert.
+ */
+describe('sharing a recorded dose', () => {
+  beforeEach(() => {
+    mockPushDoseEvent.mockReset();
+    useVaultStore.setState({ schedules: [schedule(['08:00', '20:00'])] });
+  });
+
+  it('queues the dose the person just recorded', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+
+    expect(mockPushDoseEvent).toHaveBeenCalledTimes(1);
+    expect(mockPushDoseEvent.mock.calls[0]?.[0]).toMatchObject({
+      state: 'taken',
+      recordedBySelf: true,
+      undo: false,
+    });
+  });
+
+  /** An undo is another event, not a deletion, so it travels like any other. */
+  it('queues an undo as an event that names what it supersedes', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+    const recorded = mockPushDoseEvent.mock.calls[0]?.[0] as { id: string };
+    fireEvent.press(await screen.findByTestId('me-today-dose-undo'));
+
+    expect(mockPushDoseEvent).toHaveBeenCalledTimes(2);
+    expect(mockPushDoseEvent.mock.calls[1]?.[0]).toMatchObject({
+      supersedesEventId: recorded.id,
+      undo: true,
+    });
+  });
+
+  /**
+   * A tap that changes nothing produces nothing to send. `recordDose` returns
+   * null for the same dose in the same state — two taps on one tablet are one
+   * event, on this phone and on everybody else's.
+   */
+  it('has nothing to queue for a tap that changes nothing', async () => {
+    await renderScreen();
+
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+    fireEvent.press(screen.getByTestId('me-today-dose-taken'));
+
+    const events = mockPushDoseEvent.mock.calls.filter(([event]) => event !== null);
+    expect(events).toHaveLength(1);
+    expect(useVaultStore.getState().doseEvents).toHaveLength(1);
   });
 });
