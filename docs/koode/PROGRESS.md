@@ -21,8 +21,8 @@ never hidden by closing the parent story.
 | KOO-07 | Implemented locally | Worker, leases, idempotency, DLQ, double grant/consent check; a withdrawal mid-run now ends in a state a screen can show |
 | KOO-08 | Implemented locally | Backend review/corrections/versioning plus the native review screen |
 | KOO-09 | Partly implemented | Family overview reads real roles and pulled records; attention rules tested |
-| KOO-10 | Implemented locally | Schedules confirmed by a person, doses from `occurrences.ts`, Today wired to both |
-| KOO-11 | Implemented locally | Observation entry and visit preparation built on the tested model; **no `/v1` endpoint yet, so they stay on one phone** |
+| KOO-10 | Implemented locally | Schedules confirmed by a person, doses from `occurrences.ts`, Today wired to both, and both shared over `/v1` |
+| KOO-11 | Implemented locally | Observation entry and visit preparation built on the tested model; shared over `/v1` in both directions |
 | KOO-12 | Implemented locally | Follow-up CRUD over `/v1`, one identity end to end, shared both ways; per-device calendar confirmation kept |
 | KOO-13 | Implemented locally | Consent stored, versioned and enforced; per-record export saved to a file; erasure fenced by a durable tombstone, resumable, swept by prefix |
 | KOO-14 | Blocked | Startup safety guard implemented and tested; **every cloud step needs an account this session has none of** |
@@ -484,18 +484,19 @@ does not have. None is marked complete.
 
 ### Gates actually run, at the end of this work
 
-Commit `b9e3c47`, 2026-09-08, at the end of review round four. Earlier rounds'
-numbers are kept in their own sections below so the rounds can be compared
-(`a999da8`: 844 app / 590 backend; `9c0aa01`: 885 app / 628 backend).
+Commit `bf13ab5`, 2026-09-09, after wiring the daily-care records to `/v1`.
+Earlier rounds' numbers are kept in their own sections below so the rounds can
+be compared (`a999da8`: 844 app / 590 backend; `9c0aa01`: 885 app / 628
+backend; `134c9dc`: 897 app / 643 backend).
 
 | Command | Result |
 | --- | --- |
 | `npx tsc --noEmit` (app) | **pass**, exit 0 |
 | `npx eslint .` (app) | **pass**, exit 0 |
-| `npx jest` (app) | **pass** — **897 tests / 58 suites** (371 at baseline) |
+| `npx jest` (app) | **pass** — **933 tests / 59 suites** (371 at baseline) |
 | `npx tsc --noEmit` (backend) | **pass**, exit 0 |
 | `npx eslint .` (backend) | **pass**, exit 0 |
-| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **643 passed, 92 skipped** (410 / 79 at baseline) |
+| `SKIP_OCR_TESTS=1 npx vitest run` (backend) | **pass** — **670 passed, 92 skipped** (410 / 79 at baseline) |
 | `npx vitest run` (backend, no skip) | **fail** — the same 6 `tesseractOcr` tests, unchanged from baseline and environmental |
 
 ### The two blocked gates, with their actual errors
@@ -719,6 +720,55 @@ models the refusals, which is what the routes are written against, but only the
 real service can show two writers actually racing. The share sheet still needs an
 iPhone. The rest of the limits below are unchanged.
 
+## Daily care reaches the shared record
+
+The last shared-care acceptance criterion that was unstarted rather than
+blocked. Observations, treatments and dose events were built, tested, encrypted
+and stored on one phone; `mutationSender` refused them explicitly because no
+endpoint existed. `/v1/patients/:id/observations`, `/treatments` and
+`/dose-events` now exist, the app sends to them, and a pull brings back what
+the other carer recorded.
+
+| Piece | Where |
+| --- | --- |
+| Endpoints, repository records, guarded writes | `cf96c87` |
+| Sending: `mutationSender`, `dailyCare.ts`, five screens | `d0866b0` |
+| Pulling: `reconcile`, `mergeDailyCare`, the store | `bf13ab5` |
+
+The properties that make these safe to share, each with a test:
+
+- **A note is words and nothing else.** No severity, no triage category, no
+  clinical term; a test asserts the stored keys, so adding one has to be
+  deliberate. Editing carries the version it was made against, because two
+  family members editing one note is not a rare case here.
+- **A medicine cannot exist without a confirmation.** `confirmedBy` and
+  `confirmedAt` are required and the pipeline has no path to write one.
+  Stopping supersedes; a repeated stop keeps the first date.
+- **A dose event is append-only, everywhere.** No PATCH, no DELETE, on the
+  server or in the sender. Undo appends and says it is an undo. `recordedBySelf`
+  comes from the grant on both notes and doses, never the body.
+
+**Two real defects the wiring found**, both fixed with the work:
+
+1. **A fast double tap recorded two events for one tablet.** `recordDose`
+   refuses to produce an event when the occurrence already says what the tap
+   says — but both handlers of a double tap read the same occurrence, taken
+   before either ran. The store is the only place that can see the truth, so it
+   drops a repeat and returns what it actually recorded; the screens send that
+   answer rather than what they hoped to record.
+2. **An undo tapped in the same millisecond as the dose was ignored.**
+   `occurrencesForDay` ordered by `recordedAt` and broke ties with the id, whose
+   suffix is random — so half the time the undo lost and the person watched
+   their correction vanish. The supersedes chain decides now; the clock only
+   orders what is left. Found because a date-dependent test began failing when
+   the clock passed midnight, which means it had been there all along.
+
+**Still only sent from where the screens exist.** Observation edit and deletion,
+and stopping a medicine, have endpoints and queue helpers but no screen calls
+them yet — the store actions have had no callers since they were written. That
+is the same "built and unwired" pattern this branch has hit repeatedly, and it
+is recorded here rather than left to be found.
+
 ## Resume checkpoint
 
 Next, in order:
@@ -728,10 +778,10 @@ Next, in order:
    highest-value unrun evidence in the repository.
 2. **Run the two-account journey against the real stack**, end to end, with a
    synthetic report going through the worker.
-3. **Send observations, treatments and dose events to `/v1`.** They are stored
-   and shared through no endpoint yet; `mutationSender` refuses them explicitly
-   rather than pretending. This is the last of the shared-care acceptance
-   criteria that is unstarted rather than unverified.
+3. **Build the screens for the paths that now exist but nothing calls**:
+   editing and deleting a note, and stopping a medicine. The endpoints, the
+   queue helpers and the store actions are all there and tested; no screen uses
+   them.
 4. **Exercise the export and the share sheet on a device.** The file is written
    and offered; whether the sheet behaves as intended on iOS and Android is
    untested here, like everything else native in this branch.
