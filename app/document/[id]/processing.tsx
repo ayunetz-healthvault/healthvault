@@ -14,6 +14,7 @@ import { DocumentProcessingError } from '@/services/processing/types';
 import { useSessionStore } from '@/state/sessionStore';
 import { useVaultStore } from '@/state/vaultStore';
 import { colors, radius, spacing } from '@/theme';
+import type { ProcessingStatus } from '@/types/domain';
 import { pluralise } from '@/utils/format';
 
 type Phase = 'uploading' | 'processing' | 'ready' | 'failed';
@@ -25,6 +26,45 @@ type Phase = 'uploading' | 'processing' | 'ready' | 'failed';
  * reading them — because they fail for different reasons and a caregiver on a
  * hotel wifi needs to know which one stalled.
  */
+/**
+ * What to say about a document whose pages are not on this device.
+ *
+ * Each line reports where the record actually is. None of them offers a retry:
+ * this phone cannot retry an upload it is not making.
+ */
+const REMOTE_STATE: Record<ProcessingStatus, { title: string; message: string }> = {
+  draft: {
+    title: 'Not sent yet',
+    message: 'This document was started on another device and has not been sent for reading.',
+  },
+  uploading: {
+    title: 'Being sent from another device',
+    message: 'The pages are still on their way. They will appear here once they arrive.',
+  },
+  uploaded: {
+    title: 'Waiting to be read',
+    message: 'The pages have arrived and are in the queue. This usually takes a minute or two.',
+  },
+  processing: {
+    title: 'Being read now',
+    message: 'This document is being read. Pull down on the profile to check again.',
+  },
+  ready: {
+    title: 'Ready to read',
+    message: 'The summary is available.',
+  },
+  failed: {
+    title: 'Could not be read',
+    message:
+      'Something went wrong reading this document. Whoever added it can try again from the device that has the pages.',
+  },
+  needs_review: {
+    title: 'Needs a person to read it',
+    message:
+      'There is no summary for this one. The original is still there to open, and retrying would reach the same answer.',
+  },
+};
+
 export default function ProcessingScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -45,6 +85,17 @@ export default function ProcessingScreen(): React.JSX.Element {
    * frame and then correct itself.
    */
   const alreadyProcessed = document?.status === 'ready';
+
+  /**
+   * Whether the pages are on *this* phone.
+   *
+   * A document pulled from the server arrives with an empty `pages` array —
+   * the originals are objects in the store, not URIs here. Running the pipeline
+   * on one would upload nothing and, on the demonstration path, produce a
+   * summary of nothing at all. This screen starts work, so it must not be
+   * entered for a document this device cannot do the work for.
+   */
+  const hasLocalPages = (document?.pages.length ?? 0) > 0;
 
   const [phase, setPhase] = useState<Phase>(alreadyProcessed ? 'ready' : 'uploading');
   const [uploadPercent, setUploadPercent] = useState(alreadyProcessed ? 100 : 0);
@@ -108,11 +159,11 @@ export default function ProcessingScreen(): React.JSX.Element {
     // Fires once per mount. A finished document is left alone rather than
     // re-uploaded; `startedRef` guards against the store updating mid-run and
     // re-triggering the pipeline.
-    if (!document || alreadyProcessed || startedRef.current) return;
+    if (!document || alreadyProcessed || !hasLocalPages || startedRef.current) return;
     startedRef.current = true;
 
     void run();
-  }, [document, alreadyProcessed, run]);
+  }, [document, alreadyProcessed, hasLocalPages, run]);
 
   /**
    * Cancel only when the screen is actually left.
@@ -133,7 +184,29 @@ export default function ProcessingScreen(): React.JSX.Element {
           title="Document not found"
           message="It may have been deleted."
           actionLabel="Back to home"
-          onAction={() => router.replace('/(tabs)')}
+          onAction={() => router.replace('/')}
+        />
+      </Screen>
+    );
+  }
+
+  /**
+   * Somebody else's upload.
+   *
+   * The state shown is the server's, reported rather than acted on: this phone
+   * has no pages to send and no summary to write, and pretending otherwise is
+   * how a caregiver ends up watching a progress bar for an upload happening on
+   * a different device.
+   */
+  if (!hasLocalPages && !alreadyProcessed) {
+    return (
+      <Screen testID="processing-elsewhere">
+        <EmptyState
+          icon="cloud-outline"
+          title={REMOTE_STATE[document.status].title}
+          message={REMOTE_STATE[document.status].message}
+          actionLabel="Open this document"
+          onAction={() => router.replace(`/document/${document.id}`)}
         />
       </Screen>
     );

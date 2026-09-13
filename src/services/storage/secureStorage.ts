@@ -26,12 +26,36 @@ export const SECURE_KEYS = {
   idToken: 'ayunetz.auth.idToken',
   accessToken: 'ayunetz.auth.accessToken',
   refreshToken: 'ayunetz.auth.refreshToken',
+  /**
+   * When the ID token expires, epoch millis.
+   *
+   * Kept beside the token rather than read from its own `exp` claim: the claim
+   * is only meaningful once the signature is verified, and that happens on the
+   * backend. This is the provider's stated lifetime, recorded at issue time.
+   */
+  tokenExpiresAt: 'ayunetz.auth.tokenExpiresAt',
   /** Salted hash of the PIN — the PIN itself is never stored. */
   pinVerifier: 'ayunetz.lock.pinVerifier',
   pinSalt: 'ayunetz.lock.pinSalt',
+  /**
+   * Prefix for per-account record-encryption keys: `<prefix><accountId>`.
+   *
+   * The keys live here; the records they encrypt do not. That separation is the
+   * whole point — SecureStore is small, slow and backed by the Keychain or
+   * Keystore, which is right for 32 bytes and wrong for a document.
+   */
+  vaultKeyPrefix: 'ayunetz.vault.key.',
 } as const;
 
-export type SecureKey = (typeof SECURE_KEYS)[keyof typeof SECURE_KEYS];
+/**
+ * A key this module manages.
+ *
+ * The template literal admits the per-account vault keys, which are built at
+ * runtime rather than enumerated above.
+ */
+export type SecureKey =
+  | (typeof SECURE_KEYS)[keyof typeof SECURE_KEYS]
+  | `${typeof SECURE_KEYS.vaultKeyPrefix}${string}`;
 
 const options: SecureStore.SecureStoreOptions = {
   // Records must not leave the device via an iCloud/Google backup.
@@ -128,8 +152,19 @@ export const secureStorage = {
     }
   },
 
-  /** Called on sign-out and on account deletion. */
+  /**
+   * Called on sign-out and on account deletion.
+   *
+   * Note what this does *not* remove: per-account vault keys, which are named
+   * dynamically and are destroyed explicitly by `destroyVaultKey`. Clearing
+   * them here would mean signing out of one account wiped another account's
+   * cached records on a shared phone.
+   */
   async clearAll(): Promise<void> {
-    await Promise.all(Object.values(SECURE_KEYS).map((key) => secureStorage.remove(key)));
+    await Promise.all(
+      Object.values(SECURE_KEYS)
+        .filter((key) => key !== SECURE_KEYS.vaultKeyPrefix)
+        .map((key) => secureStorage.remove(key as SecureKey)),
+    );
   },
 };

@@ -24,7 +24,15 @@ import type { StackConfig } from '../../config/stack.js';
  * which applies here for the same reason.
  */
 export interface ProcessingJob {
-  readonly ownerId: string;
+  /**
+   * Whose record the document belongs to.
+   *
+   * Not the account that uploaded it. A worker picking this job up needs to
+   * find the pages and write the summary, and both live under the patient — see
+   * ADR-005. It also means a job stays valid after the uploader is revoked,
+   * which is correct: the document is still the patient's.
+   */
+  readonly patientId: string;
   readonly documentId: string;
   /** How many pages were uploaded, so a worker can check before starting. */
   readonly pageCount: number;
@@ -54,7 +62,7 @@ export interface JobQueue {
 
 /** Rejects anything carrying more than identifiers, before it is durable. */
 const assertNoPayload = (job: ProcessingJob): void => {
-  const allowed = new Set(['ownerId', 'documentId', 'pageCount', 'attemptToken']);
+  const allowed = new Set(['patientId', 'documentId', 'pageCount', 'attemptToken']);
   const extra = Object.keys(job).filter((key) => !allowed.has(key));
 
   if (extra.length > 0) {

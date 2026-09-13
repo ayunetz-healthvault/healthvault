@@ -220,6 +220,20 @@ export default function SecuritySettingsScreen(): React.JSX.Element {
         title="How the PIN is stored"
         message="Your PIN itself is never saved. Only a salted hash of it is kept in the phone's secure keychain, which is not included in cloud backups."
       />
+
+      {/*
+        Said plainly because the two are easy to confuse, and confusing them is
+        how somebody decides a PIN is enough. The lock covers the screen; the
+        encryption covers the file. A user who turns the lock off has not turned
+        the encryption off, and a user who turns it on has not encrypted
+        anything that was not already encrypted.
+      */}
+      <Callout
+        tone="neutral"
+        title="The lock and the encryption are different things"
+        message="The lock decides who can open the app on this phone. Separately, and always, the records saved on this phone are encrypted with a key held in the secure keychain — that happens whether the lock is on or off."
+        testID="security-lock-vs-encryption"
+      />
     </Screen>
   );
 }

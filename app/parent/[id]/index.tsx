@@ -6,21 +6,33 @@ import {
   Avatar,
   Badge,
   Button,
+  Callout,
   Card,
   DocumentCard,
+  DoseCard,
   EmptyState,
   FollowUpCard,
+  ListRow,
   Screen,
   SectionHeader,
   Text,
 } from '@/components';
+import { useVaultRefresh } from '@/hooks/useVaultRefresh';
+import { recordDose, undoDose } from '@/services/treatment/occurrences';
+import { DEFAULT_TIMEZONE, localDateIn } from '@/services/treatment/patientClock';
+import { pushDoseEvent } from '@/services/sync/dailyCare';
+import { useSessionStore } from '@/state/sessionStore';
 import {
   selectDocumentTimeline,
+  selectDosesForDay,
   selectFollowUpsForParent,
+  selectLiveSchedules,
   selectParent,
   useVaultSnapshot,
+  useVaultStore,
 } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
+import type { DoseOccurrence, DoseState } from '@/types/treatment';
 import { RELATIONSHIP_LABELS } from '@/types/labels';
 import { calculateAge, formatDate } from '@/utils/date';
 import { pluralise } from '@/utils/format';
@@ -36,6 +48,9 @@ export default function ParentProfileScreen(): React.JSX.Element {
   const router = useRouter();
 
   const vault = useVaultSnapshot();
+  const refresh = useVaultRefresh();
+  const appendDoseEvent = useVaultStore((state) => state.appendDoseEvent);
+  const userId = useSessionStore((state) => state.user?.id ?? 'usr_local');
 
   const parent = id ? selectParent(vault, id) : undefined;
 
@@ -47,11 +62,37 @@ export default function ParentProfileScreen(): React.JSX.Element {
           title="Profile not found"
           message="This profile may have been deleted from another device."
           actionLabel="Back to home"
-          onAction={() => router.replace('/(tabs)')}
+          onAction={() => router.replace('/')}
         />
       </Screen>
     );
   }
+
+  const schedules = selectLiveSchedules(vault, parent.id);
+  const timezone = schedules[0]?.timezone ?? DEFAULT_TIMEZONE;
+  const doses = selectDosesForDay(vault, parent.id, localDateIn(timezone));
+
+  /**
+   * Recorded here, and sent. A dose is the fact the other person most needs —
+   * it is what stops two people giving the same tablet twice.
+   */
+  const recordFor = (occurrence: DoseOccurrence, state: DoseState): void => {
+    const recorded = recordDose({
+      occurrence,
+      state,
+      recordedBy: userId,
+      recordedBySelf: false,
+    });
+    // Sent only if the store actually recorded it: a duplicate tap writes
+    // nothing here, and must put nothing on anybody else's phone either.
+    void pushDoseEvent(appendDoseEvent(recorded));
+  };
+
+  const undoFor = (occurrence: DoseOccurrence): void => {
+    // An undo is another event, not a deletion — so it is sent like any other.
+    const undone = undoDose(occurrence, userId, false);
+    void pushDoseEvent(appendDoseEvent(undone));
+  };
 
   const documents = selectDocumentTimeline(vault, parent.id);
   const followUps = selectFollowUpsForParent(vault, parent.id).filter(
@@ -62,6 +103,8 @@ export default function ParentProfileScreen(): React.JSX.Element {
   return (
     <Screen
       testID="parent-profile"
+      onRefresh={refresh.onRefresh}
+      refreshing={refresh.refreshing}
       footer={
         <Button
           label="Add a document"
@@ -71,6 +114,10 @@ export default function ParentProfileScreen(): React.JSX.Element {
         />
       }
     >
+      {refresh.notice === null ? null : (
+        <Callout tone="warning" message={refresh.notice} testID="parent-sync-notice" />
+      )}
+
       <View style={styles.header}>
         <Avatar name={parent.fullName} color={parent.avatarColor} size={80} />
         <Text variant="title" align="center" style={styles.name}>
@@ -97,6 +144,59 @@ export default function ParentProfileScreen(): React.JSX.Element {
           testID="parent-edit-button"
         />
       </View>
+
+      {doses.length === 0 ? null : (
+        <>
+          <SectionHeader
+            title="Today’s medicines"
+            subtitle={`${pluralise(doses.length, 'dose')} scheduled`}
+            testID="parent-doses-header"
+          />
+          {doses.map((dose) => (
+            <DoseCard
+              key={dose.occurrenceKey}
+              occurrence={dose}
+              timezone={timezone}
+              /*
+                A caregiver is not the patient. `bySelf={false}` makes the
+                action read "record as not taken" rather than "I haven't taken
+                it", and every event they write is labelled as a helper's — a
+                helper reporting what they believe is a weaker claim than the
+                person themselves saying it, and the record keeps them apart.
+              */
+              bySelf={false}
+              onTaken={() => recordFor(dose, 'taken')}
+              onMissed={() => recordFor(dose, 'missed')}
+              onUndo={() => undoFor(dose)}
+              testID={`parent-dose-${dose.occurrenceKey}`}
+            />
+          ))}
+        </>
+      )}
+
+      <Card style={styles.detailsCard}>
+        <ListRow
+          icon="download-outline"
+          title="Export this record"
+          subtitle="Everything held for this person, as it stands now."
+          onPress={() => router.push(`/parent/${parent.id}/export`)}
+          testID="parent-export-link"
+        />
+        <ListRow
+          icon="create-outline"
+          title="Notes and symptoms"
+          subtitle="Anything you have noticed, in your own words, ready for the next visit."
+          onPress={() => router.push(`/observation/new?patientId=${parent.id}`)}
+          testID="parent-observation-link"
+        />
+        <ListRow
+          icon="shield-checkmark-outline"
+          title="What this person has agreed to"
+          subtitle="Storing records, reading reports automatically, and sharing with family — each one separately."
+          onPress={() => router.push(`/parent/${parent.id}/consent`)}
+          testID="parent-consent-link"
+        />
+      </Card>
 
       <Card style={styles.detailsCard}>
         <DetailRow

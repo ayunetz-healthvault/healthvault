@@ -1,4 +1,3 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { useShallow } from 'zustand/react/shallow';
@@ -7,9 +6,17 @@ import { isDemoBuild } from '@/config/env';
 import { MOCK_DOCUMENTS, MOCK_SUMMARIES } from '@/mocks/documents';
 import { buildMockFollowUps } from '@/mocks/followUps';
 import { MOCK_PARENTS } from '@/mocks/parents';
-import { STORAGE_KEYS } from '@/services/storage/persistence';
+import { activeVaultStorage } from '@/services/storage/activeVault';
+import { mergeDocuments } from '@/services/sync/mergeDocuments';
+import {
+  mergeDoseEvents,
+  mergeObservations,
+  mergeSchedules,
+} from '@/services/sync/mergeDailyCare';
+import { mergeFollowUps, type PendingChange } from '@/services/sync/mergeFollowUps';
 import type {
   DocumentSummary,
+  SummaryCorrection,
   FollowUp,
   FollowUpDraft,
   FollowUpStatus,
@@ -18,6 +25,9 @@ import type {
   ParentProfile,
   ProcessingStatus,
 } from '@/types/domain';
+import { occurrencesForDay } from '@/services/treatment/occurrences';
+import type { Observation, VisitQuestion } from '@/types/observations';
+import type { DoseEvent, DoseOccurrence, TreatmentSchedule } from '@/types/treatment';
 import { byCreatedAtDesc, byDueDateAsc, isOverdue, nowIso } from '@/utils/date';
 import { avatarColorFor } from '@/utils/format';
 import { createId } from '@/utils/id';
@@ -32,13 +42,138 @@ import { createId } from '@/utils/id';
  *
  * Writes are local-first. TODO(backend): each mutation below gets a matching
  * call from `endpoints`, queued and retried when offline.
+ *
+ * ## Where this is persisted
+ *
+ * Encrypted, and namespaced by the signed-in account — see `activeVault.ts`.
+ * The store itself knows nothing about accounts: the storage adapter resolves
+ * the current one on every call, so signing in as somebody else changes what
+ * this store reads without a line here changing.
+ *
+ * Two consequences worth stating. Nothing is written while signed out. And
+ * `hydrateForAccount` must be called after a sign-in, because the middleware
+ * hydrates once at construction — when nobody was signed in and there was, by
+ * design, nothing to read.
  */
+
+/**
+ * A completed pull, in the shape the store applies.
+ *
+ * Deliberately not `PulledRecords`: that type carries the server's patient
+ * payload, and translating it into profiles is the caller's job — the store
+ * should not have to know what a `RemotePatient` looks like.
+ */
+/**
+ * What somebody confirms when they say "yes, I am taking this".
+ *
+ * `times` and `confirmedBy` are required and have no defaults, because those
+ * two fields are the whole difference between a medicine a model read on a
+ * prescription and a medicine somebody is actually taking.
+ */
+export interface ScheduleConfirmation {
+  readonly patientId: string;
+  readonly name: string;
+  readonly dosage: string;
+  /** `HH:mm`, in `timezone`. Chosen by a person, never parsed from "twice a day". */
+  readonly times: string[];
+  readonly timezone: string;
+  readonly startDate: string;
+  readonly endDate: string | null;
+  /** The document this was read from, or null when it was typed in. */
+  readonly source: TreatmentSchedule['source'];
+  readonly confirmedBy: string;
+}
+
+export interface ObservationDraft {
+  readonly patientId: string;
+  readonly text: string;
+  /** When it happened, which is not when it was written down. */
+  readonly occurredAt: string;
+  readonly impact: Observation['impact'];
+  readonly recordedBy: string;
+  readonly recordedBySelf: boolean;
+}
+
+export interface VisitQuestionDraft {
+  readonly patientId: string;
+  readonly text: string;
+  readonly origin: VisitQuestion['origin'];
+  readonly source?: VisitQuestion['source'];
+  readonly askedBy: string;
+  readonly askedBySelf: boolean;
+  readonly order?: number;
+}
+
+export interface AppliedPull {
+  readonly parents: ParentProfile[];
+  readonly documentsByPatient: Record<string, MedicalDocument[]>;
+  /** Keyed by the server's document id. */
+  readonly summaries: Record<string, DocumentSummary>;
+  /** The shared task list, keyed by patient. */
+  readonly followUpsByPatient: Record<string, FollowUp[]>;
+  /** What daily care produced elsewhere, keyed by patient. */
+  readonly observationsByPatient: Record<string, Observation[]>;
+  readonly schedulesByPatient: Record<string, TreatmentSchedule[]>;
+  readonly doseEventsByPatient: Record<string, DoseEvent[]>;
+  /**
+   * Follow-up changes still queued on this device, or `unknown` when the outbox
+   * could not be read.
+   *
+   * The pull must not overwrite those: the outbox is holding the only copy of
+   * what somebody just did, and the server's row is the state before they did
+   * it. A pending *delete* has no local row at all, which is why the operation
+   * travels with the id — see `mergeFollowUps`.
+   */
+  readonly pendingFollowUps: readonly PendingChange[] | 'unknown';
+  /**
+   * Queued changes to notes and medicines, or `unknown`.
+   *
+   * Dose events need no equivalent: they are append-only, so the merge is a
+   * union and a union cannot lose an unsent change.
+   */
+  readonly pendingDailyCare: readonly PendingChange[] | 'unknown';
+  readonly removedPatientIds: string[];
+}
 
 interface VaultState {
   parents: ParentProfile[];
   documents: MedicalDocument[];
   summaries: DocumentSummary[];
   followUps: FollowUp[];
+  /**
+   * Medicines somebody has confirmed they are taking.
+   *
+   * Never written by the summary pipeline. A medicine a model read off a
+   * prescription is a `MedicineMention`; it becomes a schedule only when a
+   * person confirms it, with times they chose — see `confirmSchedule`.
+   */
+  schedules: TreatmentSchedule[];
+  /**
+   * What somebody noticed, in their own words.
+   *
+   * Never classified, never mapped to a clinical term. See
+   * `types/observations.ts` for why there is no severity scale here.
+   */
+  observations: Observation[];
+  /** Questions to ask at the next visit, including suggestions once accepted. */
+  visitQuestions: VisitQuestion[];
+  /**
+   * What happened to each dose. Append-only, including undo.
+   *
+   * "Did my mother take her tablet this morning" is a question about the
+   * record, and a record that can be quietly erased cannot answer it.
+   */
+  doseEvents: DoseEvent[];
+  /**
+   * When this device last confirmed the record against the server.
+   *
+   * Null means never — a demonstration build, or an account that has not been
+   * online since signing in. Shown wherever the app presents the record as a
+   * whole (the visit list especially), because a list assembled from a week-old
+   * copy may be missing whatever a sibling added since, and a page that looks
+   * complete while quietly omitting that is worse than no page.
+   */
+  lastPulledAt: string | null;
   seeded: boolean;
 
   // --- Seed -----------------------------------------------------------------
@@ -61,6 +196,13 @@ interface VaultState {
 
   // --- Documents ------------------------------------------------------------
   addDocument: (document: MedicalDocument) => void;
+  /**
+   * Records the id the server issued for a document this device uploaded.
+   *
+   * Without it the next pull sees an id it does not recognise and files a
+   * second copy of the same report.
+   */
+  attachRemoteId: (id: string, remoteId: string) => void;
   updateDocumentStatus: (
     id: string,
     status: ProcessingStatus,
@@ -70,14 +212,72 @@ interface VaultState {
 
   // --- Summaries ------------------------------------------------------------
   addSummary: (summary: DocumentSummary) => void;
+  /**
+   * Appends a correction to a summary.
+   *
+   * Appends, and never edits `summary`. A person saying "the date is 3
+   * September, not 9 March" is a *second* fact about the document, and losing
+   * the first means nobody can tell whether the model was wrong or they were.
+   */
+  addCorrection: (documentId: string, correction: SummaryCorrection) => void;
+  /** Records that a person checked this version against the original. */
+  markSummaryReviewed: (documentId: string, reviewedBy: string, version: number) => void;
+
+  // --- Treatment ------------------------------------------------------------
+  /**
+   * Turns a confirmed medicine into a schedule.
+   *
+   * Takes `confirmedBy` because there is no such thing as a schedule nobody
+   * confirmed: the argument is required so a caller cannot create one by
+   * omission. Supersedes any live schedule for the same medicine rather than
+   * editing it, so the previous instructions stay readable.
+   */
+  confirmSchedule: (draft: ScheduleConfirmation) => TreatmentSchedule;
+  /** Stops a schedule without deleting it. */
+  supersedeSchedule: (scheduleId: string) => void;
+  /**
+   * Records a dose event, and says what it actually recorded.
+   *
+   * Returns null when nothing was written — a null argument, or a second tap
+   * that says what the record already says. Callers use the answer to decide
+   * what to send: queueing an event the store rejected would put a dose on
+   * everybody else's phone that does not exist on this one.
+   */
+  appendDoseEvent: (event: DoseEvent | null) => DoseEvent | null;
+
+  // --- Observations and questions -------------------------------------------
+  addObservation: (draft: ObservationDraft) => Observation;
+  updateObservation: (id: string, patch: { text?: string; impact?: Observation['impact'] }) => void;
+  removeObservation: (id: string) => void;
+  /**
+   * Adds a question.
+   *
+   * `origin` is required, and `accepted_suggestion` means exactly that: a
+   * person read the summariser's suggestion and chose to ask it. There is no
+   * path that adds a suggestion without somebody accepting it.
+   */
+  addVisitQuestion: (draft: VisitQuestionDraft) => VisitQuestion;
+  removeVisitQuestion: (id: string) => void;
+
+  // --- Sync -----------------------------------------------------------------
+  /**
+   * Applies what the server returned to what this device holds.
+   *
+   * The merge rules live in `mergeDocuments`, deliberately outside the store:
+   * deciding whether the phone or the server is right about a given document is
+   * the part worth testing, and it does not need a store to be tested.
+   */
+  applyPulledRecords: (pulled: AppliedPull) => void;
 
   // --- Follow-ups -----------------------------------------------------------
   addFollowUp: (draft: FollowUpDraft) => FollowUp;
   updateFollowUp: (id: string, patch: Partial<FollowUp>) => void;
   setFollowUpStatus: (id: string, status: FollowUpStatus) => void;
-  attachCalendarEvent: (id: string, eventId: string | null) => void;
   removeFollowUp: (id: string) => void;
 }
+
+/** The one name the persist middleware and the hydration path must agree on. */
+export const VAULT_STORAGE_KEY = 'vault';
 
 export const useVaultStore = create<VaultState>()(
   persist(
@@ -86,6 +286,11 @@ export const useVaultStore = create<VaultState>()(
       documents: [],
       summaries: [],
       followUps: [],
+      schedules: [],
+      doseEvents: [],
+      observations: [],
+      visitQuestions: [],
+      lastPulledAt: null,
       seeded: false,
 
       seedDemoData: () => {
@@ -128,7 +333,18 @@ export const useVaultStore = create<VaultState>()(
       },
 
       clearAll: () =>
-        set({ parents: [], documents: [], summaries: [], followUps: [], seeded: true }),
+        set({
+          parents: [],
+          documents: [],
+          summaries: [],
+          followUps: [],
+          schedules: [],
+          doseEvents: [],
+          observations: [],
+          visitQuestions: [],
+          lastPulledAt: null,
+          seeded: true,
+        }),
 
       // --- Parents ------------------------------------------------------------
       addParent: (draft) => {
@@ -166,6 +382,11 @@ export const useVaultStore = create<VaultState>()(
 
       // --- Documents ----------------------------------------------------------
       addDocument: (document) => set((state) => ({ documents: [document, ...state.documents] })),
+
+      attachRemoteId: (id, remoteId) =>
+        set((state) => ({
+          documents: state.documents.map((doc) => (doc.id === id ? { ...doc, remoteId } : doc)),
+        })),
 
       updateDocumentStatus: (id, status, extra = {}) =>
         set((state) => ({
@@ -208,6 +429,311 @@ export const useVaultStore = create<VaultState>()(
         })),
 
       // --- Follow-ups ---------------------------------------------------------
+      applyPulledRecords: ({
+        parents,
+        documentsByPatient,
+        summaries,
+        followUpsByPatient,
+        observationsByPatient,
+        schedulesByPatient,
+        doseEventsByPatient,
+        pendingFollowUps,
+        pendingDailyCare,
+        removedPatientIds,
+      }) =>
+        set((state) => {
+          const removed = new Set(removedPatientIds);
+
+          const documents = mergeDocuments({
+            local: state.documents,
+            remoteByPatient: documentsByPatient,
+            removedPatientIds,
+          });
+
+          const keptDocumentIds = new Set(documents.map((doc) => doc.id));
+          const byId = new Map(state.parents.map((parent) => [parent.id, parent]));
+          for (const parent of parents) byId.set(parent.id, parent);
+          for (const patientId of removed) byId.delete(patientId);
+
+          /**
+           * A pulled summary is filed under the id the *local* record uses,
+           * which is not always the server's — a document this device uploaded
+           * keeps its local id. Looking it up here rather than at the fetch
+           * keeps `reconcile` free of the store.
+           */
+          const localIdFor = new Map(
+            documents.flatMap((doc) => (doc.remoteId ? [[doc.remoteId, doc.id] as const] : [])),
+          );
+
+          const pulledSummaries = Object.entries(summaries).flatMap(
+            ([remoteDocumentId, summary]) => {
+              const documentId = localIdFor.get(remoteDocumentId) ?? remoteDocumentId;
+              if (!keptDocumentIds.has(documentId)) return [];
+              return [{ ...summary, documentId }];
+            },
+          );
+
+          const pulledFor = new Set(pulledSummaries.map((summary) => summary.documentId));
+
+          return {
+            // Set only here, where a pull actually succeeded. A failed refresh
+            // must never move this forward — that is the whole point of it.
+            lastPulledAt: nowIso(),
+            parents: [...byId.values()],
+            documents,
+            summaries: [
+              // A revoked or deleted record takes its summaries with it, and a
+              // freshly pulled summary replaces the copy this device had.
+              ...state.summaries.filter(
+                (summary) =>
+                  keptDocumentIds.has(summary.documentId) && !pulledFor.has(summary.documentId),
+              ),
+              ...pulledSummaries,
+            ],
+            followUps: mergeFollowUps({
+              local: state.followUps,
+              remoteByPatient: followUpsByPatient,
+              removedPatientIds,
+              pending: pendingFollowUps,
+            }),
+            observations: mergeObservations({
+              local: state.observations,
+              remoteByPatient: observationsByPatient,
+              removedPatientIds,
+              pending: pendingDailyCare,
+            }),
+            schedules: mergeSchedules({
+              local: state.schedules,
+              remoteByPatient: schedulesByPatient,
+              removedPatientIds,
+              pending: pendingDailyCare,
+            }),
+            doseEvents: mergeDoseEvents({
+              local: state.doseEvents,
+              remoteByPatient: doseEventsByPatient,
+              removedPatientIds,
+            }),
+          };
+        }),
+
+      addCorrection: (documentId, correction) =>
+        set((state) => ({
+          summaries: state.summaries.map((summary) =>
+            summary.documentId === documentId
+              ? { ...summary, corrections: [...(summary.corrections ?? []), correction] }
+              : summary,
+          ),
+        })),
+
+      markSummaryReviewed: (documentId, reviewedBy, version) => {
+        const timestamp = nowIso();
+
+        set((state) => ({
+          summaries: state.summaries.map((summary) =>
+            summary.documentId === documentId
+              ? {
+                  ...summary,
+                  reviewedAt: timestamp,
+                  reviewedBy,
+                  reviewedVersion: version,
+                }
+              : summary,
+          ),
+          // Mirrored onto the document so a list can show which summaries
+          // nobody has checked without loading every summary.
+          documents: state.documents.map((document) =>
+            document.id === documentId
+              ? { ...document, reviewedAt: timestamp, reviewedBy, updatedAt: timestamp }
+              : document,
+          ),
+        }));
+      },
+
+      confirmSchedule: (draft) => {
+        const timestamp = nowIso();
+
+        const schedule: TreatmentSchedule = {
+          id: createId('trt'),
+          patientId: draft.patientId,
+          name: draft.name,
+          dosage: draft.dosage,
+          times: [...draft.times].sort(),
+          timezone: draft.timezone,
+          startDate: draft.startDate,
+          endDate: draft.endDate,
+          provenance: draft.source === null ? 'manual' : 'from_document',
+          source: draft.source,
+          /**
+           * Both required by the type, and both come from the caller. There is
+           * no default here on purpose: a schedule nobody confirmed is a
+           * reading of a document, and this app must not turn one into
+           * reminders to take a drug.
+           */
+          confirmedBy: draft.confirmedBy,
+          confirmedAt: timestamp,
+          supersededAt: null,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({
+          schedules: [
+            /**
+             * A live schedule for the same medicine is superseded, not edited.
+             * Somebody whose dose changed from 500 mg to 250 mg has a history
+             * worth keeping — and the doses already recorded against the old
+             * schedule stay attached to what was actually being taken then.
+             */
+            ...state.schedules.map((existing) =>
+              existing.patientId === draft.patientId &&
+              existing.supersededAt === null &&
+              existing.name.trim().toLowerCase() === draft.name.trim().toLowerCase()
+                ? { ...existing, supersededAt: timestamp, updatedAt: timestamp }
+                : existing,
+            ),
+            schedule,
+          ],
+        }));
+
+        return schedule;
+      },
+
+      supersedeSchedule: (scheduleId) =>
+        set((state) => ({
+          schedules: state.schedules.map((schedule) =>
+            schedule.id === scheduleId && schedule.supersededAt === null
+              ? { ...schedule, supersededAt: nowIso(), updatedAt: nowIso() }
+              : schedule,
+          ),
+        })),
+
+      /**
+       * Null is accepted and ignored — and so is a duplicate.
+       *
+       * `recordDose` returns null when the tap would change nothing, and
+       * handling that here means no screen has to remember to check. What that
+       * alone does not cover is two taps in the same instant: both handlers
+       * read the same occurrence, both see "not recorded", and both produce a
+       * real event. The screen cannot tell, because it is looking at a snapshot
+       * taken before either tap.
+       *
+       * This is the only place that can. `set` sees the current list, so a
+       * second event that merely repeats what the live one already says is
+       * dropped — one tablet, one event, however fast somebody presses.
+       *
+       * An undo and a correction both pass: an undo names the event it
+       * supersedes, and a correction carries a different state. Those are
+       * people changing their minds, which the record is supposed to keep.
+       */
+      appendDoseEvent: (event) => {
+        if (event === null) return null;
+
+        let appended: DoseEvent | null = null;
+
+        set((state) => {
+          const superseded = new Set(
+            state.doseEvents.flatMap((entry) =>
+              entry.supersedesEventId === null ? [] : [entry.supersedesEventId],
+            ),
+          );
+          const live = state.doseEvents
+            .filter(
+              (entry) => entry.occurrenceKey === event.occurrenceKey && !superseded.has(entry.id),
+            )
+            .at(-1);
+
+          /**
+           * An undo carries the state it undid — "taken, then that was undone"
+           * rather than "taken, then missed", which would be a much stronger
+           * claim. So a live event that *is* an undo means the dose is not
+           * recorded, and answering it again is a new answer rather than a
+           * repeat of an old one.
+           */
+          const repeats =
+            live !== undefined &&
+            !live.undo &&
+            live.state === event.state &&
+            event.supersedesEventId === null &&
+            !event.undo;
+
+          if (repeats) return state;
+
+          appended = event;
+          return { doseEvents: [...state.doseEvents, event] };
+        });
+
+        return appended;
+      },
+
+      addObservation: (draft) => {
+        const timestamp = nowIso();
+
+        const observation: Observation = {
+          id: createId('obs'),
+          patientId: draft.patientId,
+          // Stored exactly as written. Trimmed only of surrounding whitespace —
+          // never normalised, never mapped to a term. See the type.
+          text: draft.text.trim(),
+          occurredAt: draft.occurredAt,
+          impact: draft.impact,
+          recordedBy: draft.recordedBy,
+          recordedBySelf: draft.recordedBySelf,
+          recordedAt: timestamp,
+          version: 1,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({ observations: [...state.observations, observation] }));
+        return observation;
+      },
+
+      updateObservation: (id, patch) =>
+        set((state) => ({
+          observations: state.observations.map((observation) =>
+            observation.id === id
+              ? {
+                  ...observation,
+                  ...(patch.text === undefined ? {} : { text: patch.text.trim() }),
+                  ...(patch.impact === undefined ? {} : { impact: patch.impact }),
+                  // Bumped so a concurrent change is a conflict, not a race.
+                  version: observation.version + 1,
+                  updatedAt: nowIso(),
+                }
+              : observation,
+          ),
+        })),
+
+      removeObservation: (id) =>
+        set((state) => ({
+          observations: state.observations.filter((observation) => observation.id !== id),
+        })),
+
+      addVisitQuestion: (draft) => {
+        const timestamp = nowIso();
+
+        const question: VisitQuestion = {
+          id: createId('obs'),
+          patientId: draft.patientId,
+          text: draft.text.trim(),
+          origin: draft.origin,
+          source: draft.source ?? null,
+          askedBy: draft.askedBy,
+          askedBySelf: draft.askedBySelf,
+          createdAt: timestamp,
+          order: draft.order ?? 0,
+          version: 1,
+          updatedAt: timestamp,
+        };
+
+        set((state) => ({ visitQuestions: [...state.visitQuestions, question] }));
+        return question;
+      },
+
+      removeVisitQuestion: (id) =>
+        set((state) => ({
+          visitQuestions: state.visitQuestions.filter((question) => question.id !== id),
+        })),
+
       addFollowUp: (draft) => {
         const timestamp = nowIso();
         const followUp: FollowUp = {
@@ -231,17 +757,75 @@ export const useVaultStore = create<VaultState>()(
 
       setFollowUpStatus: (id, status) => get().updateFollowUp(id, { status }),
 
-      attachCalendarEvent: (id, eventId) => get().updateFollowUp(id, { calendarEventId: eventId }),
-
       removeFollowUp: (id) =>
         set((state) => ({ followUps: state.followUps.filter((followUp) => followUp.id !== id) })),
     }),
     {
-      name: STORAGE_KEYS.parents,
-      storage: createJSONStorage(() => AsyncStorage),
+      name: VAULT_STORAGE_KEY,
+      storage: createJSONStorage(() => activeVaultStorage),
     },
   ),
 );
+
+/**
+ * Re-reads the vault for whoever is signed in now.
+ *
+ * The persist middleware hydrates exactly once, when the store is created —
+ * which happens at import time, before anybody has signed in and while the
+ * storage adapter is correctly refusing to read anything. Without this call the
+ * vault would stay empty for the whole session.
+ *
+ * ## Why it checks storage before touching state
+ *
+ * The obvious implementation — clear the store, then rehydrate — destroys the
+ * records it is trying to load. The persist middleware writes on *every* state
+ * change, so clearing first saves an empty vault over the stored one, and the
+ * rehydrate that follows reads back what the clear just wrote. It only appeared
+ * to work because the write and the read race, and the read usually won.
+ *
+ * So: look first. If the account has something stored, rehydrate reads it with
+ * no destructive write in front of it. If it has nothing, the store is emptied
+ * — which is the case that matters for account switching, because otherwise the
+ * previous account's records would simply stay in memory.
+ */
+export const hydrateVaultForAccount = async (): Promise<void> => {
+  const stored = await activeVaultStorage.getItem(VAULT_STORAGE_KEY);
+
+  if (stored === null) {
+    closeVaultInMemory();
+    return;
+  }
+
+  await useVaultStore.persist.rehydrate();
+};
+
+/**
+ * Empties the vault in memory.
+ *
+ * **Detach the storage first.** The persist middleware writes on every state
+ * change, so calling this while the vault is still open for an account saves an
+ * empty vault over that account's records — a sign-out that silently deletes
+ * everything on the device. `closeVault()` then `closeVaultInMemory()`, in that
+ * order, every time.
+ *
+ * With the storage detached the rows stay where they are, encrypted under a key
+ * only that account has, so signing back in a minute later does not mean
+ * re-downloading every record. `forgetAccountLocally` is the destructive form.
+ */
+export const closeVaultInMemory = (): void => {
+  useVaultStore.setState({
+    parents: [],
+    documents: [],
+    summaries: [],
+    followUps: [],
+    schedules: [],
+    doseEvents: [],
+    observations: [],
+    visitQuestions: [],
+    lastPulledAt: null,
+    seeded: false,
+  });
+};
 
 // ---------------------------------------------------------------------------
 // Selectors
@@ -255,6 +839,11 @@ export interface VaultSnapshot {
   documents: MedicalDocument[];
   summaries: DocumentSummary[];
   followUps: FollowUp[];
+  schedules: TreatmentSchedule[];
+  doseEvents: DoseEvent[];
+  observations: Observation[];
+  visitQuestions: VisitQuestion[];
+  lastPulledAt: string | null;
 }
 
 /**
@@ -274,8 +863,36 @@ export const useVaultSnapshot = (): VaultSnapshot =>
       documents: state.documents,
       summaries: state.summaries,
       followUps: state.followUps,
+      schedules: state.schedules,
+      doseEvents: state.doseEvents,
+      observations: state.observations,
+      visitQuestions: state.visitQuestions,
+      lastPulledAt: state.lastPulledAt,
     })),
   );
+
+/**
+ * The current vault as a plain snapshot, outside React.
+ *
+ * For tests and for services that need to read the vault without a hook.
+ * Exported mainly so the field list lives in one place: every caller that built
+ * its own object had to be edited each time the vault grew, which is churn that
+ * teaches nobody anything.
+ */
+export const vaultSnapshot = (): VaultSnapshot => {
+  const state = useVaultStore.getState();
+  return {
+    parents: state.parents,
+    documents: state.documents,
+    summaries: state.summaries,
+    followUps: state.followUps,
+    schedules: state.schedules,
+    doseEvents: state.doseEvents,
+    observations: state.observations,
+    visitQuestions: state.visitQuestions,
+    lastPulledAt: state.lastPulledAt,
+  };
+};
 
 export const selectParent = (state: VaultSnapshot, parentId: string): ParentProfile | undefined =>
   state.parents.find((parent) => parent.id === parentId);
@@ -330,3 +947,65 @@ export const selectParentStats = (state: VaultSnapshot, parentId: string): Paren
     nextFollowUp: followUps[0],
   };
 };
+
+// ---------------------------------------------------------------------------
+// Treatment selectors
+//
+// The occurrence logic itself lives in `services/treatment/occurrences.ts` and
+// is pure; these only narrow the vault down to one person's records before
+// handing it over.
+// ---------------------------------------------------------------------------
+
+/** The schedules currently in force for one person. */
+export const selectLiveSchedules = (
+  state: VaultSnapshot,
+  patientId: string,
+): TreatmentSchedule[] =>
+  state.schedules.filter(
+    (schedule) => schedule.patientId === patientId && schedule.supersededAt === null,
+  );
+
+/**
+ * Every schedule for one person, superseded ones included.
+ *
+ * For the medicines list, which shows what somebody used to take as well as
+ * what they take now — a doctor asking "when did she stop the 500?" needs it.
+ */
+export const selectAllSchedules = (
+  state: VaultSnapshot,
+  patientId: string,
+): TreatmentSchedule[] => state.schedules.filter((schedule) => schedule.patientId === patientId);
+
+/**
+ * The doses due for one person on one local date.
+ *
+ * `localDate` is passed in rather than read from the clock so a screen renders
+ * the same thing in a test at any hour, and so the *patient's* date is used
+ * rather than the reader's — a daughter in Berlin opening this at 22:00 is
+ * looking at her mother's tomorrow.
+ */
+export const selectDosesForDay = (
+  state: VaultSnapshot,
+  patientId: string,
+  localDate: string,
+): DoseOccurrence[] =>
+  occurrencesForDay(selectLiveSchedules(state, patientId), doseEventsFor(state, patientId), localDate);
+
+const doseEventsFor = (state: VaultSnapshot, patientId: string): DoseEvent[] =>
+  state.doseEvents.filter((event) => event.patientId === patientId);
+
+/** One follow-up by id, wherever it belongs. */
+export const selectFollowUp = (state: VaultSnapshot, followUpId: string): FollowUp | undefined =>
+  state.followUps.find((followUp) => followUp.id === followUpId);
+
+/** One person's observations, newest first — the order a visit list wants. */
+export const selectObservations = (state: VaultSnapshot, patientId: string): Observation[] =>
+  state.observations
+    .filter((observation) => observation.patientId === patientId)
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt));
+
+/** One person's questions, in the order the family put them. */
+export const selectVisitQuestions = (state: VaultSnapshot, patientId: string): VisitQuestion[] =>
+  state.visitQuestions
+    .filter((question) => question.patientId === patientId)
+    .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));

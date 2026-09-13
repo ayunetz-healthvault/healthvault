@@ -3,16 +3,30 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { loadConfig, type AppConfig } from './config/env.js';
 import { loadIdentityConfig, type IdentityConfig } from './config/identity.js';
+import { assertSafeToStart } from './config/productionSafety.js';
 import { loadStackConfig, type StackConfig } from './config/stack.js';
 import { installAuthentication } from './routes/authentication.js';
 import { healthRoutes } from './routes/health.js';
 import { localIdentityRoutes } from './routes/localIdentity.js';
 import { processDocumentRoutes } from './routes/processDocument.js';
+import { accessRoutes } from './routes/v1/access.js';
+import { consentRoutes } from './routes/v1/consent.js';
 import { documentRoutes } from './routes/v1/documents.js';
-import { parentRoutes } from './routes/v1/parents.js';
+import { followUpRoutes } from './routes/v1/followUps.js';
+import { dailyCareRoutes } from './routes/v1/dailyCare.js';
+import { privacyRightsRoutes } from './routes/v1/privacyRights.js';
+import { reviewRoutes } from './routes/v1/review.js';
 import { createLocalIssuer, inProcessKeys } from './services/identity/localIssuer.js';
 import { createObjectStore, type ObjectStore } from './services/objects/ObjectStore.js';
 import { createJobQueue, type JobQueue } from './services/queue/JobQueue.js';
+import {
+  createAccessRepository,
+  type AccessRepository,
+} from './services/access/AccessRepository.js';
+import {
+  createPatientRecordRepository,
+  type PatientRecordRepository,
+} from './services/records/PatientRecordRepository.js';
 import {
   createRecordRepository,
   type RecordRepository,
@@ -31,6 +45,10 @@ export interface BuildAppOptions {
   verifier?: TokenVerifier;
   /** Injected so the API can be tested without the local stack running. */
   repository?: RecordRepository;
+  /** Grants and invitations. See ADR-005. */
+  access?: AccessRepository;
+  /** Patient-partitioned clinical records. See ADR-005. */
+  patients?: PatientRecordRepository;
   objects?: ObjectStore;
   queue?: JobQueue;
   /** Injected so routes can be tested without an OCR engine or AI provider. */
@@ -58,6 +76,16 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
   const config = options.config ?? loadConfig();
   const stack = options.stack ?? loadStackConfig();
   const identity = options.identity ?? loadIdentityConfig(stack.name, stack.region);
+
+  /**
+   * Before anything is built.
+   *
+   * A configuration that would serve mock summaries as real ones, or point
+   * production at a laptop's containers, must not produce a running service —
+   * it would look healthy while being wrong in a way nobody notices until
+   * somebody acts on the output.
+   */
+  assertSafeToStart({ config, stack });
   const processor =
     options.processor ??
     new DocumentProcessingOrchestrator({
@@ -123,11 +151,27 @@ export const buildApp = (options: BuildAppOptions = {}): FastifyInstance => {
 
   app.register(async (v1) => {
     const repository = options.repository ?? createRecordRepository(stack);
+    const access = options.access ?? createAccessRepository(stack);
+    const patients = options.patients ?? createPatientRecordRepository(stack);
     const objects = options.objects ?? createObjectStore(stack);
     const queue = options.queue ?? createJobQueue(stack);
 
-    await v1.register(parentRoutes, { repository });
-    await v1.register(documentRoutes, { repository, objects, queue });
+    // `repository` stays available for the ADR-005 migration and for
+    // account-level items; no /v1 route reads through it any more.
+    void repository;
+
+    await v1.register(accessRoutes, { access, patients });
+    await v1.register(documentRoutes, { access, patients, objects, queue });
+    await v1.register(reviewRoutes, { access, patients, objects });
+    await v1.register(consentRoutes, { access, patients });
+    await v1.register(followUpRoutes, { access, patients });
+    await v1.register(dailyCareRoutes, { access, patients });
+    await v1.register(privacyRightsRoutes, {
+      access,
+      patients,
+      objects,
+      uploadUrlTtlSeconds: stack.presignTtlSeconds,
+    });
   });
 
   /**

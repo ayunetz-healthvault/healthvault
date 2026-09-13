@@ -1,5 +1,7 @@
 import { Text as RNText, type TextProps as RNTextProps, type TextStyle } from 'react-native';
 
+import { useDensityScale } from './DensityContext';
+
 import { colors, typography } from '@/theme';
 
 export type TextVariant = keyof typeof typography;
@@ -29,6 +31,12 @@ export interface TextProps extends RNTextProps {
  * `maxFontSizeMultiplier` is capped at 1.6 rather than left unbounded: users
  * who have bumped the system font size still need the layout to hold together,
  * and anything past ~1.6x starts truncating the summary cards.
+ *
+ * Size is the type scale multiplied by the subtree's density (see
+ * `DensityContext`), which is how the individual parent's screens come out
+ * larger without a second set of styles. The cap is applied to the *scaled*
+ * size, so a comfortable-density screen at 200% system text is bounded the same
+ * way a standard one is.
  */
 export function Text({
   variant = 'body',
@@ -37,11 +45,20 @@ export function Text({
   style,
   ...rest
 }: TextProps): React.JSX.Element {
+  const { fontScale } = useDensityScale();
+  const scale = typography[variant];
+
   return (
     <RNText
       maxFontSizeMultiplier={1.6}
       style={[
-        typography[variant] as TextStyle,
+        scale as TextStyle,
+        fontScale === 1
+          ? null
+          : {
+              fontSize: Math.round(scale.fontSize * fontScale),
+              lineHeight: Math.round(scale.lineHeight * fontScale),
+            },
         { color: TONE_COLORS[tone] },
         align ? { textAlign: align } : null,
         style,

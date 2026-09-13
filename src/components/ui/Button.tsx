@@ -8,6 +8,7 @@ import {
   type ViewStyle,
 } from 'react-native';
 
+import { useDensityScale } from './DensityContext';
 import { Text } from './Text';
 
 import { colors, radius, spacing, touchTarget } from '@/theme';
@@ -51,7 +52,9 @@ const FOREGROUNDS: Record<ButtonVariant, string> = {
  *
  * Every variant is at least 56pt tall (64pt at `large`) — these screens get
  * used one-handed, often by someone who is worried, and a missed tap on
- * "Confirm" is expensive.
+ * "Confirm" is expensive. At the comfortable density the floor rises to the
+ * 58pt the approved reference gives the parent's main action, so the height is
+ * the larger of the two rather than whichever was written last.
  */
 export function Button({
   label,
@@ -68,9 +71,13 @@ export function Button({
   testID,
   style,
 }: ButtonProps): React.JSX.Element {
+  const { primaryActionHeight } = useDensityScale();
   const isInert = disabled || loading;
   const foreground = isInert ? colors.textMuted : FOREGROUNDS[variant];
-  const height = size === 'large' ? touchTarget.comfortable : touchTarget.min;
+  const height = Math.max(
+    size === 'large' ? touchTarget.comfortable : touchTarget.min,
+    primaryActionHeight,
+  );
 
   const backgroundFor = ({ pressed }: PressableStateCallbackType): ViewStyle => ({
     backgroundColor: isInert

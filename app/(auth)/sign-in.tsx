@@ -31,7 +31,7 @@ export default function SignInScreen(): React.JSX.Element {
     setSubmitting(true);
     try {
       const session = await authService.signIn({ email, password });
-      signIn(session);
+      await signIn(session);
       router.replace('/');
     } catch (caught) {
       if (caught instanceof AuthError) {
@@ -53,7 +53,7 @@ export default function SignInScreen(): React.JSX.Element {
     setSubmitting(true);
     try {
       const session = await authService.signInAsDemo();
-      signIn(session);
+      await signIn(session);
       router.replace('/');
     } catch (caught) {
       console.error('[ayunetz] Unexpected demo sign-in failure:', caught);
@@ -78,6 +78,12 @@ export default function SignInScreen(): React.JSX.Element {
             variant="ghost"
             onPress={() => router.push('/sign-up')}
             testID="sign-in-to-sign-up"
+          />
+          <Button
+            label="I forgot my password"
+            variant="ghost"
+            onPress={() => router.push('/reset-password')}
+            testID="sign-in-to-reset"
           />
         </>
       }

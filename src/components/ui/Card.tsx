@@ -8,13 +8,21 @@ export interface CardProps extends ViewProps {
   accessibilityLabel?: string | undefined;
   accessibilityHint?: string | undefined;
   padded?: boolean | undefined;
-  tone?: 'default' | 'accent' | 'warning' | 'danger' | undefined;
+  /**
+   * `quiet` and `appointment` are the reference's soft green and peach. They
+   * are surfaces, not statuses: neither carries meaning on its own, so both
+   * always sit under an explicit text label. `warning` and `danger` are the
+   * ones that mean something.
+   */
+  tone?: 'default' | 'accent' | 'quiet' | 'appointment' | 'warning' | 'danger' | undefined;
   style?: ViewStyle | undefined;
 }
 
 const TONE_STYLES: Record<NonNullable<CardProps['tone']>, ViewStyle> = {
   default: { backgroundColor: colors.surface, borderColor: colors.border },
   accent: { backgroundColor: colors.surfaceAccent, borderColor: colors.primarySoft },
+  quiet: { backgroundColor: colors.surfaceQuiet, borderColor: colors.surfaceQuiet },
+  appointment: { backgroundColor: colors.surfaceAppointment, borderColor: colors.surfaceAppointment },
   warning: { backgroundColor: colors.warningSoft, borderColor: colors.warning },
   danger: { backgroundColor: colors.dangerSoft, borderColor: colors.danger },
 };
@@ -57,7 +65,7 @@ export function Card({
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: radius.lg,
+    borderRadius: radius.card,
     borderWidth: 1,
     ...elevation.card,
   },

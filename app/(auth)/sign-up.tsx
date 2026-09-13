@@ -29,8 +29,17 @@ export default function SignUpScreen(): React.JSX.Element {
     setError(null);
     setSubmitting(true);
     try {
-      const session = await authService.signUp({ email, password, fullName, location });
-      signIn(session);
+      const result = await authService.signUp({ email, password, fullName, location });
+
+      if (!result.confirmed) {
+        // The pool wants an emailed code. Saying so, and carrying the address
+        // forward, is the difference between "check your email" and an
+        // unexplained failure the moment they try to sign in.
+        router.replace({ pathname: '/confirm', params: { email: result.email } });
+        return;
+      }
+
+      await signIn(await authService.signIn({ email: result.email, password }));
       router.replace('/');
     } catch (caught) {
       if (caught instanceof AuthError) {

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import {
@@ -15,7 +15,12 @@ import {
   SectionHeader,
   Text,
 } from '@/components';
+import {
+  currentCalendarMappings,
+  type CalendarMapping,
+} from '@/services/calendar/calendarMappings';
 import { calendarService } from '@/services/calendar/calendarService';
+import { pushChange } from '@/services/sync/pushService';
 import { useSessionStore } from '@/state/sessionStore';
 import { selectDocument, selectParent, useVaultSnapshot, useVaultStore } from '@/state/vaultStore';
 import { colors, spacing } from '@/theme';
@@ -33,6 +38,18 @@ import { describeDueDate, formatDate, formatDateTime, formatTime, isOverdue } fr
  * The calendar action is the only place in the app that writes to something
  * outside its own storage, so it goes through an explicit preview-and-confirm
  * dialog showing exactly what will be created and where.
+ *
+ * ## Whose calendar event this is
+ *
+ * The event lives in `calendarMappings`, on this device, and not on the shared
+ * follow-up. A calendar event id means nothing on any phone but the one that
+ * created it, so a shared field got it wrong in both directions: a sister who
+ * added the visit to her calendar made the task look already added to her
+ * brother, who then had no reminder — and if he added it anyway, his id
+ * replaced hers, so cancelling deleted nothing on her phone.
+ *
+ * `calendarMappings` was written for exactly this and had no caller. This is
+ * the caller.
  */
 export default function FollowUpScreen(): React.JSX.Element {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -40,10 +57,11 @@ export default function FollowUpScreen(): React.JSX.Element {
 
   const vault = useVaultSnapshot();
   const setFollowUpStatus = useVaultStore((state) => state.setFollowUpStatus);
-  const attachCalendarEvent = useVaultStore((state) => state.attachCalendarEvent);
   const removeFollowUp = useVaultStore((state) => state.removeFollowUp);
   const calendarSyncEnabled = useSessionStore((state) => state.privacy.calendarSyncEnabled);
 
+  /** This phone's event for this task, if it has one. Never another phone's. */
+  const [localEvent, setLocalEvent] = useState<CalendarMapping | null>(null);
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [deleteVisible, setDeleteVisible] = useState(false);
   const [calendarBusy, setCalendarBusy] = useState(false);
@@ -53,6 +71,21 @@ export default function FollowUpScreen(): React.JSX.Element {
     tone: 'success' | 'danger' | 'info';
     message: string;
   } | null>(null);
+
+  useEffect(() => {
+    if (id === undefined) return;
+
+    let current = true;
+    void currentCalendarMappings()
+      ?.find(id)
+      .then((mapping) => {
+        if (current) setLocalEvent(mapping);
+      });
+
+    return () => {
+      current = false;
+    };
+  }, [id]);
 
   const followUp = vault.followUps.find((item) => item.id === id);
 
@@ -64,7 +97,7 @@ export default function FollowUpScreen(): React.JSX.Element {
           title="Follow-up not found"
           message="It may have been deleted."
           actionLabel="Back to follow-ups"
-          onAction={() => router.replace('/(tabs)/schedule')}
+          onAction={() => router.replace('/schedule')}
         />
       </Screen>
     );
@@ -84,10 +117,28 @@ export default function FollowUpScreen(): React.JSX.Element {
     setCalendarVisible(false);
 
     switch (result.status) {
-      case 'created':
-        attachCalendarEvent(followUp.id, result.eventId);
+      case 'created': {
+        /**
+         * Recorded on this device only.
+         *
+         * Nothing about this event is shared, because nothing about it is true
+         * anywhere else: the id addresses one calendar on one phone. Another
+         * family member's app decides for itself whether to offer them their
+         * own reminder, which is the right answer — they may want one even
+         * though somebody else already has one.
+         */
+        const mapping: CalendarMapping = {
+          followUpId: followUp.id,
+          calendarId: result.calendarId,
+          eventId: result.eventId,
+          title: preview.title,
+          createdAt: new Date().toISOString(),
+        };
+        await currentCalendarMappings()?.remember(mapping);
+        setLocalEvent(mapping);
         setNotice({ tone: 'success', message: `Added to ${result.calendarTitle}.` });
         break;
+      }
       case 'permission_denied':
         setNotice({
           tone: 'danger',
@@ -116,9 +167,11 @@ export default function FollowUpScreen(): React.JSX.Element {
   };
 
   const handleRemoveFromCalendar = async (): Promise<void> => {
-    if (!followUp.calendarEventId) return;
-    const removed = await calendarService.removeEvent(followUp.calendarEventId);
-    attachCalendarEvent(followUp.id, null);
+    if (localEvent === null) return;
+
+    const removed = await calendarService.removeEvent(localEvent.eventId);
+    await currentCalendarMappings()?.forget(followUp.id);
+    setLocalEvent(null);
     setNotice({
       tone: removed ? 'success' : 'danger',
       message: removed
@@ -129,12 +182,33 @@ export default function FollowUpScreen(): React.JSX.Element {
 
   const handleDelete = (): void => {
     setDeleteVisible(false);
-    if (followUp.calendarEventId) void calendarService.removeEvent(followUp.calendarEventId);
+    if (localEvent !== null) {
+      void calendarService.removeEvent(localEvent.eventId);
+      void currentCalendarMappings()?.forget(followUp.id);
+    }
     removeFollowUp(followUp.id);
-    router.replace('/(tabs)/schedule');
+    void pushChange({
+      patientId: followUp.parentId,
+      entity: 'follow_up',
+      entityId: followUp.id,
+      operation: 'delete',
+      payload: null,
+    });
+    router.replace('/schedule');
   };
 
-  const setStatus = (status: FollowUpStatus): void => setFollowUpStatus(followUp.id, status);
+  const setStatus = (status: FollowUpStatus): void => {
+    setFollowUpStatus(followUp.id, status);
+    // Completing a task is the change other people most need to see: it is what
+    // stops two family members turning up to the same appointment.
+    void pushChange({
+      patientId: followUp.parentId,
+      entity: 'follow_up',
+      entityId: followUp.id,
+      operation: 'update',
+      payload: { status },
+    });
+  };
 
   return (
     <Screen
@@ -142,6 +216,18 @@ export default function FollowUpScreen(): React.JSX.Element {
       footer={
         followUp.status === 'scheduled' ? (
           <>
+            {/*
+              The list somebody actually takes into the room: their own notes,
+              their questions, the medicines really being taken. Offered from
+              the appointment because that is when it is wanted.
+            */}
+            <Button
+              label="What to take to this"
+              icon="clipboard-outline"
+              variant="secondary"
+              onPress={() => router.push(`/visit/${followUp.id}`)}
+              testID="followup-prepare"
+            />
             <Button
               label="Mark as done"
               icon="checkmark-circle-outline"
@@ -149,13 +235,11 @@ export default function FollowUpScreen(): React.JSX.Element {
               testID="followup-complete"
             />
             <Button
-              label={followUp.calendarEventId ? 'Remove from calendar' : 'Add to my calendar'}
+              label={localEvent === null ? 'Add to my calendar' : 'Remove from calendar'}
               variant="secondary"
               icon="calendar-outline"
               onPress={() =>
-                followUp.calendarEventId
-                  ? void handleRemoveFromCalendar()
-                  : setCalendarVisible(true)
+                localEvent === null ? setCalendarVisible(true) : void handleRemoveFromCalendar()
               }
               testID="followup-calendar"
             />
@@ -223,9 +307,11 @@ export default function FollowUpScreen(): React.JSX.Element {
           }
         />
         {overdue ? <Badge label="Overdue" tone="danger" icon="alert-circle" /> : null}
-        {followUp.calendarEventId ? (
+        {/* "Your" calendar, on this phone. Another family member's app answers
+            this question for itself, from its own mapping. */}
+        {localEvent === null ? null : (
           <Badge label="In your calendar" tone="info" icon="calendar" />
-        ) : null}
+        )}
       </View>
 
       {followUp.notes ? (
@@ -339,9 +425,9 @@ export default function FollowUpScreen(): React.JSX.Element {
         visible={deleteVisible}
         title="Delete this follow-up?"
         message={
-          followUp.calendarEventId
-            ? 'The follow-up and its calendar event will both be removed. This cannot be undone.'
-            : 'This cannot be undone.'
+          localEvent === null
+            ? 'This cannot be undone.'
+            : 'The follow-up and its calendar event will both be removed. This cannot be undone.'
         }
         confirmLabel="Delete"
         destructive

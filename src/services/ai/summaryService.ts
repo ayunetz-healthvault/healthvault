@@ -147,9 +147,13 @@ export const summaryService = {
       // TODO(backend): poll `endpoints.processing.status(document.id)` with
       // exponential backoff until status is `ready` or `failed`, then GET the
       // summary. The SQS worker typically finishes in 8–20 seconds.
-      const state = await apiClient.get<ProcessingState>(endpoints.processing.status(document.id));
+      const state = await apiClient.get<ProcessingState>(
+        endpoints.processing.status(document.parentId, document.id),
+      );
       onStateChange?.(state);
-      return apiClient.get<DocumentSummary>(endpoints.summaries.getForDocument(document.id));
+      return apiClient.get<DocumentSummary>(
+        endpoints.summaries.getForDocument(document.parentId, document.id),
+      );
     }
 
     const stages: ProcessingStage[] = [
@@ -197,9 +201,11 @@ export const summaryService = {
     return seeded ?? buildGeneratedSummary(document);
   },
 
-  async fetchSummary(documentId: string): Promise<DocumentSummary | null> {
+  async fetchSummary(parentId: string, documentId: string): Promise<DocumentSummary | null> {
     if (isBackendEnabled()) {
-      return apiClient.get<DocumentSummary>(endpoints.summaries.getForDocument(documentId));
+      return apiClient.get<DocumentSummary>(
+        endpoints.summaries.getForDocument(parentId, documentId),
+      );
     }
     return MOCK_SUMMARIES.find((summary) => summary.documentId === documentId) ?? null;
   },

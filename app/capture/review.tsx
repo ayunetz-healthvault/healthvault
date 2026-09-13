@@ -100,7 +100,7 @@ export default function ReviewScreen(): React.JSX.Element {
     setDiscardVisible(false);
     capture.reset();
     router.dismissAll();
-    router.replace('/(tabs)');
+    router.replace('/');
   };
 
   if (capture.pages.length === 0) {
@@ -156,6 +156,15 @@ export default function ReviewScreen(): React.JSX.Element {
         title={pluralise(capture.pages.length, 'page')}
         subtitle={parent ? `For ${parent.fullName}` : undefined}
       />
+
+      {capture.storageWarning === null ? null : (
+        <Callout
+          tone="warning"
+          title="Save these soon"
+          message={capture.storageWarning}
+          testID="capture-storage-warning"
+        />
+      )}
 
       {capture.pages.map((page, index) => (
         <PageReviewTile

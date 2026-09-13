@@ -34,3 +34,22 @@ export const notFound = (what: string) => ({
   message: `No such ${what}.`,
   retryable: false,
 });
+
+/**
+ * What a caller is told about a record that is being erased.
+ *
+ * A record in the middle of a deletion accepts no new rows. Refusing with a
+ * body rather than letting the write through is the difference between an
+ * erasure that finishes and one that races an upload it never sees: the sweep
+ * has already passed that key, so a document written now survives a deletion
+ * that reports success.
+ *
+ * `retryable: false` on purpose. This is not a busy server; the record is going
+ * away, and a client that retried would be waiting for a state that will never
+ * come back.
+ */
+export const beingDeleted = () => ({
+  code: 'record_deleting' as const,
+  message: 'This record is being deleted, so nothing more can be added to it.',
+  retryable: false,
+});

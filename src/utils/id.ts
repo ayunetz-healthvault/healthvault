@@ -17,7 +17,31 @@ const randomChunk = (length: number): string => {
   return out;
 };
 
-export type IdPrefix = 'par' | 'doc' | 'pag' | 'sum' | 'fup' | 'job' | 'usr' | 'fnd' | 'med';
+export type IdPrefix =
+  | 'par'
+  | 'doc'
+  | 'pag'
+  | 'sum'
+  | 'fup'
+  | 'job'
+  | 'usr'
+  | 'fnd'
+  | 'med'
+  /**
+   * An outbox mutation, and the idempotency key that travels with it.
+   *
+   * Generated once, before the first attempt, and reused on every retry — see
+   * `Mutation.id`. A request that times out after the server committed it is
+   * indistinguishable from one that never arrived, so the retry has to be
+   * recognisable as the same change.
+   */
+  | 'mut'
+  /** A recorded dose occurrence. */
+  | 'dse'
+  /** A confirmed treatment schedule. Never minted from a document alone. */
+  | 'trt'
+  /** A symptom or observation written by a person. */
+  | 'obs';
 
 /**
  * Monotonic-ish, sortable, collision-resistant enough for a single device.

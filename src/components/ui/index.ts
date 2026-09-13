@@ -3,6 +3,12 @@ export { Badge, type BadgeProps, type BadgeTone } from './Badge';
 export { Button, type ButtonProps, type ButtonVariant } from './Button';
 export { Callout, type CalloutProps, type CalloutTone } from './Callout';
 export { Card, type CardProps } from './Card';
+export {
+  DensityProvider,
+  useDensity,
+  useDensityScale,
+  type DensityProviderProps,
+} from './DensityContext';
 export { ChipSelect, type ChipOption, type ChipSelectProps } from './ChipSelect';
 export { ConfirmDialog, type ConfirmDialogProps } from './ConfirmDialog';
 export { EmptyState, type EmptyStateProps } from './EmptyState';

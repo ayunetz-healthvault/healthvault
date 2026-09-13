@@ -77,10 +77,44 @@ export type DocumentCategory =
   | 'other';
 
 export type ProcessingStatus =
-  'draft' | 'uploading' | 'uploaded' | 'processing' | 'ready' | 'failed';
+  | 'draft'
+  | 'uploading'
+  | 'uploaded'
+  | 'processing'
+  | 'ready'
+  | 'failed'
+  /**
+   * The pipeline stopped and a person has to look at the original.
+   *
+   * Distinct from `failed`, which means something went wrong and retrying may
+   * help. This means the run finished and produced no usable summary — an
+   * unreadable page, or AI processing that was not agreed to. Retrying reads
+   * the same bytes and reaches the same conclusion.
+   *
+   * The backend has always had this state. The client did not, so a pulled
+   * document in it had nowhere honest to land.
+   */
+  | 'needs_review';
 
 export interface MedicalDocument {
   readonly id: string;
+  /**
+   * The server's id for this same document, once it has one.
+   *
+   * A document is created locally, with a local id, before anything is
+   * uploaded — the record has to survive the app being killed mid-capture. The
+   * server then issues its own id, and that is the one the record is known by
+   * everywhere else: every other device, and every later pull.
+   *
+   * Both are kept because both are real. Dropping the local id would orphan the
+   * pages and the upload session that reference it; dropping the server id
+   * would make the next pull look like a *different* document and file a
+   * duplicate next to the original.
+   *
+   * Null on a document that has never reached a server, and on one pulled from
+   * a server (where `id` already is the server's).
+   */
+  remoteId?: string | null;
   readonly parentId: string;
   title: string;
   category: DocumentCategory;
@@ -94,6 +128,18 @@ export interface MedicalDocument {
   summaryId: string | null;
   /** Human-readable reason when `status === 'failed'`. */
   failureReason: string | null;
+  /**
+   * When a person checked the extracted summary against the original.
+   *
+   * Undefined on records written before review existed; null once the summary
+   * is ready and nobody has checked it. Note what this is *not*: a person
+   * confirming that the app read the page correctly is not a clinician
+   * validating the content, and no screen may describe it as one. The full
+   * correction and version history lands with KOO-08.
+   */
+  reviewedAt?: IsoDateTime | null;
+  /** Account id of whoever reviewed it, so the record says who. */
+  reviewedBy?: string | null;
   readonly createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
 }
@@ -271,6 +317,47 @@ export interface DocumentSummary {
   privacy?: PrivacyProcessingResult;
   /** Processing-pipeline version, distinct from `privacy.pipelineVersion`. */
   pipelineVersion?: string;
+  /**
+   * Which run produced this text.
+   *
+   * Carried so a correction can name the version it was made against. Without
+   * it a correction typed against version 1 could land on a version 2 the
+   * person never saw — the classic lost update, except what is lost is a
+   * statement about somebody's medication. Absent means version 1.
+   */
+  version?: number;
+  /**
+   * What people said instead, newest last, never rewritten.
+   *
+   * Append-only, and kept *beside* the model's output rather than applied to
+   * it. Losing the original means nobody can ever tell whether the model was
+   * wrong or the corrector was.
+   */
+  corrections?: SummaryCorrection[];
+  /**
+   * When a person checked this version against the original, and who.
+   *
+   * Note what it is not: a person confirming the app read a page correctly is
+   * not a clinician validating the content, and no screen may describe it as
+   * one.
+   */
+  reviewedAt?: IsoDateTime | null;
+  reviewedBy?: string | null;
+  /** The version that was checked. A newer one is unchecked again. */
+  reviewedVersion?: number;
+}
+
+/** One person's correction to one field of one summary version. */
+export interface SummaryCorrection {
+  readonly id: string;
+  /** Dotted path into the summary, e.g. `findings.0.value`. */
+  readonly field: string;
+  readonly previousValue: string;
+  readonly correctedValue: string;
+  readonly correctedBy: string;
+  readonly correctedAt: IsoDateTime;
+  /** The version the corrector was looking at. */
+  readonly summaryVersion: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +382,15 @@ export interface FollowUp {
   /** Document that prompted this follow-up, when there is one. */
   sourceDocumentId: string | null;
   doctorCategory: DoctorCategory | null;
-  /** Set only after the user explicitly confirms the calendar prompt. */
+  /**
+   * Always null on a record this app writes or pulls.
+   *
+   * A calendar event id addresses one calendar on one device, so this app keeps
+   * its own in `calendarMappings`, on the device that made it. The field
+   * survives because the `/v1` contract still carries it and an older client
+   * may still set it — reading it as this device's event is what put a "remove
+   * from your calendar" button on a phone with nothing to remove.
+   */
   calendarEventId: string | null;
   readonly createdAt: IsoDateTime;
   updatedAt: IsoDateTime;
