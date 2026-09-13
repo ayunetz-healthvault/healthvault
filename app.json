@@ -2,6 +2,7 @@
   "expo": {
     "name": "Ayunetz Health Vault",
     "slug": "ayunetz-health-vault",
+    "owner": "ayunetz-health-vault",
     "scheme": "ayunetz",
     "version": "0.1.0",
     "orientation": "portrait",
@@ -88,7 +89,7 @@
     "extra": {
       "router": {},
       "eas": {
-        "projectId": "00000000-0000-0000-0000-000000000000"
+        "projectId": "4aef255c-821e-49c3-a465-b4947f96e9a8"
       }
     }
   }
